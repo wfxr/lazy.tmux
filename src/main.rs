@@ -16,7 +16,7 @@ use tmup::sync::{self, SyncMode, SyncPolicy};
 use tmup::{loader, lockfile, plugin, termui, tmux};
 
 #[derive(Debug, Parser)]
-#[command(name = "tmup", about = "Modern tmux plugin manager")]
+#[command(name = "tmup", about = "Modern tmux plugin manager", version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

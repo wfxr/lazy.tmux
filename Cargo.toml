@@ -28,3 +28,8 @@ assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
 tokio = { version = "1", features = ["time"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = "symbols"

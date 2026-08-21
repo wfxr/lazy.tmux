@@ -2,6 +2,16 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 #[test]
+fn cli_version_reports_cargo_package_version() {
+    Command::cargo_bin("tmup")
+        .unwrap()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(format!("tmup {}\n", env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
 fn cli_help_lists_core_commands() {
     Command::cargo_bin("tmup")
         .unwrap()
