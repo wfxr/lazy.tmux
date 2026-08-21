@@ -25,10 +25,7 @@ if [ -n "$manifest_path" ]; then
 else
     version=$("$script_dir/validate-version.sh" "$tag")
 fi
-
-if ! LC_ALL=C printf '%s\n' "$target" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]*$'; then
-    fail "invalid target name: $target"
-fi
+target=$("$script_dir/validate-target.sh" "$target")
 
 package_name="tmup-v${version}-${target}"
 expected_archive_name="${package_name}.tar.gz"
