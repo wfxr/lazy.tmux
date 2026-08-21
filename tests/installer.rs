@@ -13,7 +13,10 @@ struct InstallerTest {
     fixtures_dir: PathBuf,
     tmp_dir: PathBuf,
     download_log: PathBuf,
+    authorization_log: PathBuf,
     checksum_log: PathBuf,
+    host_log: PathBuf,
+    cargo_log: PathBuf,
 }
 
 impl InstallerTest {
@@ -28,7 +31,10 @@ impl InstallerTest {
 
         let test = Self {
             download_log: root.path().join("downloads.log"),
+            authorization_log: root.path().join("authorization.log"),
             checksum_log: root.path().join("checksums.log"),
+            host_log: root.path().join("host.log"),
+            cargo_log: root.path().join("cargo.log"),
             root,
             bin_dir,
             fixtures_dir,
@@ -42,6 +48,11 @@ impl InstallerTest {
         test.write_fake_curl();
         test.write_fake_wget();
         test.write_checksum_tools();
+        test.write_fake_host_tools();
+        test.write_executable(
+            &test.bin_dir.join("cargo"),
+            "#!/bin/sh\nprintf 'cargo\\n' >> \"$TMUP_TEST_CARGO_LOG\"\nexit 99\n",
+        );
         test
     }
 
@@ -55,10 +66,15 @@ impl InstallerTest {
             r#"#!/bin/sh
 output=
 url=
+authorization=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --output)
             output=$2
+            shift 2
+            ;;
+        --header)
+            authorization=$2
             shift 2
             ;;
         http://*|https://*)
@@ -71,6 +87,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 printf 'curl %s\n' "$url" >> "$TMUP_TEST_DOWNLOAD_LOG"
+[ -z "$authorization" ] || printf '%s\n' "$authorization" >> "$TMUP_TEST_AUTHORIZATION_LOG"
 cp "$TMUP_TEST_FIXTURES/${url##*/}" "$output"
 "#,
         );
@@ -82,10 +99,15 @@ cp "$TMUP_TEST_FIXTURES/${url##*/}" "$output"
             r#"#!/bin/sh
 output=
 url=
+authorization=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --output-document)
             output=$2
+            shift 2
+            ;;
+        --header)
+            authorization=$2
             shift 2
             ;;
         http://*|https://*)
@@ -98,6 +120,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 printf 'wget %s\n' "$url" >> "$TMUP_TEST_DOWNLOAD_LOG"
+[ -z "$authorization" ] || printf '%s\n' "$authorization" >> "$TMUP_TEST_AUTHORIZATION_LOG"
 cp "$TMUP_TEST_FIXTURES/${url##*/}" "$output"
 "#,
         );
@@ -138,6 +161,28 @@ cp "$TMUP_TEST_FIXTURES/${url##*/}" "$output"
         }
     }
 
+    fn write_fake_host_tools(&self) {
+        self.write_executable(
+            &self.bin_dir.join("uname"),
+            r#"#!/bin/sh
+printf 'uname %s\n' "$1" >> "$TMUP_TEST_HOST_LOG"
+case "$1" in
+    -s) printf '%s\n' "$TMUP_TEST_HOST_OS" ;;
+    -m) printf '%s\n' "$TMUP_TEST_HOST_ARCH" ;;
+    *) exit 1 ;;
+esac
+"#,
+        );
+        self.write_executable(
+            &self.bin_dir.join("sysctl"),
+            r#"#!/bin/sh
+printf 'sysctl %s\n' "$*" >> "$TMUP_TEST_HOST_LOG"
+[ "$TMUP_TEST_ROSETTA" = 1 ] || exit 1
+printf '1\n'
+"#,
+        );
+    }
+
     fn remove_tool(&self, tool: &str) {
         fs::remove_file(self.bin_dir.join(tool)).unwrap();
     }
@@ -175,6 +220,19 @@ cp "$TMUP_TEST_FIXTURES/${url##*/}" "$output"
         self.package_payload(version, target, &archive_dir);
     }
 
+    fn add_latest_release(&self, version: &str, target: &str, binary: &str) {
+        self.add_release(version, target, binary);
+        self.write_latest_release(version);
+    }
+
+    fn write_latest_release(&self, version: &str) {
+        fs::write(
+            self.fixtures_dir.join("latest"),
+            format!("{{\n  \"tag_name\": \"v{version}\"\n}}\n"),
+        )
+        .unwrap();
+    }
+
     fn package_payload(&self, version: &str, target: &str, payload_member: &str) {
         let archive_name = format!("tmup-v{version}-{target}.tar.gz");
         let archive_path = self.fixtures_dir.join(&archive_name);
@@ -205,17 +263,29 @@ cp "$TMUP_TEST_FIXTURES/${url##*/}" "$output"
         self.root.path().join("payload").join(format!("tmup-v{version}-{target}"))
     }
 
-    fn run(&self, args: &[&str]) -> Output {
-        Command::new("/bin/sh")
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command
             .arg(installer_path())
             .args(args)
             .env("PATH", &self.bin_dir)
             .env("TMPDIR", &self.tmp_dir)
             .env("TMUP_TEST_FIXTURES", &self.fixtures_dir)
             .env("TMUP_TEST_DOWNLOAD_LOG", &self.download_log)
+            .env("TMUP_TEST_AUTHORIZATION_LOG", &self.authorization_log)
             .env("TMUP_TEST_CHECKSUM_LOG", &self.checksum_log)
-            .output()
-            .unwrap()
+            .env("TMUP_TEST_HOST_LOG", &self.host_log)
+            .env("TMUP_TEST_CARGO_LOG", &self.cargo_log)
+            .env("TMUP_TEST_HOST_OS", "Linux")
+            .env("TMUP_TEST_HOST_ARCH", "x86_64")
+            .env("TMUP_TEST_ROSETTA", "0")
+            .env("HOME", self.root.path().join("home"))
+            .env_remove("GITHUB_TOKEN");
+        command
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
     }
 
     fn install(&self, version: &str, target: &str, destination: &Path) -> Output {
@@ -292,7 +362,124 @@ fn installs_an_explicit_verified_release() {
 }
 
 #[test]
-fn help_describes_the_explicit_install_interface() {
+fn installs_githubs_latest_stable_release_when_version_is_omitted() {
+    let test = InstallerTest::new();
+    test.add_latest_release("1.2.3", TARGET, "latest tmup\n");
+    let destination = test.root.path().join("destination");
+
+    let output = test.run(&["--target", TARGET, "--to", destination.to_str().unwrap()]);
+
+    assert!(
+        output.status.success(),
+        "installer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(destination.join("tmup")).unwrap(), "latest tmup\n");
+    let downloads = fs::read_to_string(&test.download_log).unwrap();
+    assert!(downloads.starts_with("curl https://api.github.com/repos/wfxr/tmup/releases/latest\n"));
+    assert!(downloads.contains("/releases/download/v1.2.3/tmup-v1.2.3-"));
+    assert!(!test.authorization_log.exists());
+}
+
+#[test]
+fn installs_to_home_local_bin_by_default_and_warns_when_it_is_not_in_path() {
+    let test = InstallerTest::new();
+    test.add_latest_release("1.2.3", TARGET, "default install tmup\n");
+
+    let output = test.run(&[]);
+
+    assert!(
+        output.status.success(),
+        "installer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let default_destination = test.root.path().join("home/.local/bin");
+    assert_eq!(
+        fs::read_to_string(default_destination.join("tmup")).unwrap(),
+        "default install tmup\n"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(default_destination.to_str().unwrap()));
+    assert!(stderr.contains("not in PATH"));
+}
+
+#[test]
+fn does_not_warn_when_the_destination_is_already_in_path() {
+    let test = InstallerTest::new();
+    test.add_release("1.2.3", TARGET, "path tmup\n");
+    let destination = test.root.path().join("destination");
+    let path = env::join_paths([test.bin_dir.as_path(), destination.as_path()]).unwrap();
+    let output = test
+        .command(&["--version", "1.2.3", "--target", TARGET, "--to", destination.to_str().unwrap()])
+        .env("PATH", path)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "installer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8(output.stderr).unwrap().contains("not in PATH"));
+}
+
+#[test]
+fn authenticates_latest_release_lookups_when_github_token_is_present() {
+    for downloader in ["curl", "wget"] {
+        let test = InstallerTest::new();
+        if downloader == "wget" {
+            test.remove_tool("curl");
+        }
+        test.add_latest_release("1.2.3", TARGET, "authenticated tmup\n");
+        let destination = test.root.path().join("destination");
+        let output = test
+            .command(&["--target", TARGET, "--to", destination.to_str().unwrap()])
+            .env("GITHUB_TOKEN", "test-token")
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "{downloader} installer failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(&test.authorization_log).unwrap(),
+            "Authorization: Bearer test-token\n"
+        );
+    }
+}
+
+#[test]
+fn refuses_a_prerelease_returned_by_the_latest_stable_endpoint() {
+    let test = InstallerTest::new();
+    test.write_latest_release("2.0.0-rc.1");
+    let destination = test.root.path().join("destination");
+
+    let output = test.run(&["--target", TARGET, "--to", destination.to_str().unwrap()]);
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr).unwrap().contains("not stable"));
+    assert_eq!(fs::read_to_string(&test.download_log).unwrap().lines().count(), 1);
+    assert!(!destination.exists());
+    test.assert_temporary_storage_is_empty();
+}
+
+#[test]
+fn latest_release_lookup_failure_does_not_install_or_leave_temporary_state() {
+    let test = InstallerTest::new();
+    let destination = test.root.path().join("destination");
+
+    let output = test.run(&["--target", TARGET, "--to", destination.to_str().unwrap()]);
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr).unwrap().contains("failed to resolve"));
+    assert!(!destination.exists());
+    test.assert_temporary_storage_is_empty();
+}
+
+#[test]
+fn help_describes_installer_options_and_defaults() {
     let test = InstallerTest::new();
 
     let output = test.run(&["--help"]);
@@ -302,25 +489,9 @@ fn help_describes_the_explicit_install_interface() {
     for option in ["--version", "--target", "--to", "--force", "--help"] {
         assert!(stdout.contains(option), "help omitted {option}: {stdout}");
     }
-}
-
-#[test]
-fn explicit_version_target_and_destination_are_required() {
-    let test = InstallerTest::new();
-    let destination = test.root.path().join("destination");
-    let destination = destination.to_str().unwrap();
-    let cases = [
-        (vec!["--target", TARGET, "--to", destination], "--version is required"),
-        (vec!["--version", "1.2.3", "--to", destination], "--target is required"),
-        (vec!["--version", "1.2.3", "--target", TARGET], "--to is required"),
-    ];
-
-    for (args, expected_error) in cases {
-        let output = test.run(&args);
-        assert!(!output.status.success());
-        assert!(String::from_utf8(output.stderr).unwrap().contains(expected_error));
+    for default in ["latest stable", "native host target", "~/.local/bin"] {
+        assert!(stdout.contains(default), "help omitted {default}: {stdout}");
     }
-    assert!(!test.download_log.exists());
 }
 
 #[test]
@@ -414,6 +585,20 @@ fn rejects_unsupported_explicit_targets_with_the_supported_list() {
 }
 
 #[test]
+fn rejects_multiple_supported_targets_as_one_override() {
+    let test = InstallerTest::new();
+    let destination = test.root.path().join("destination");
+    let combined_target = "x86_64-unknown-linux-musl aarch64-unknown-linux-musl";
+
+    let output = test.install("1.2.3", combined_target, &destination);
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr).unwrap().contains("unsupported target"));
+    assert!(!test.download_log.exists());
+    assert!(!destination.exists());
+}
+
+#[test]
 fn accepts_each_supported_explicit_target() {
     for target in [
         "x86_64-unknown-linux-musl",
@@ -433,6 +618,86 @@ fn accepts_each_supported_explicit_target() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(fs::read_to_string(destination.join("tmup")).unwrap(), target);
+    }
+}
+
+#[test]
+fn detects_each_supported_physical_host_target() {
+    let cases = [
+        ("Linux", "x86_64", "0", "x86_64-unknown-linux-musl"),
+        ("Linux", "aarch64", "0", "aarch64-unknown-linux-musl"),
+        ("Darwin", "x86_64", "0", "x86_64-apple-darwin"),
+        ("Darwin", "arm64", "0", "aarch64-apple-darwin"),
+        ("Darwin", "x86_64", "1", "aarch64-apple-darwin"),
+    ];
+
+    for (os, arch, rosetta, expected_target) in cases {
+        let test = InstallerTest::new();
+        test.add_release("1.2.3", expected_target, expected_target);
+        let destination = test.root.path().join("destination");
+        let output = test
+            .command(&["--version", "1.2.3", "--to", destination.to_str().unwrap()])
+            .env("TMUP_TEST_HOST_OS", os)
+            .env("TMUP_TEST_HOST_ARCH", arch)
+            .env("TMUP_TEST_ROSETTA", rosetta)
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "{os}/{arch} (Rosetta {rosetta}) failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read_to_string(destination.join("tmup")).unwrap(), expected_target);
+    }
+}
+
+#[test]
+fn explicit_target_bypasses_host_detection() {
+    let test = InstallerTest::new();
+    test.add_release("1.2.3", TARGET, "explicit target tmup\n");
+    let destination = test.root.path().join("destination");
+    let output = test
+        .command(&["--version", "1.2.3", "--target", TARGET, "--to", destination.to_str().unwrap()])
+        .env("TMUP_TEST_HOST_OS", "unsupported-os")
+        .env("TMUP_TEST_HOST_ARCH", "unsupported-arch")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "installer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(destination.join("tmup")).unwrap(), "explicit target tmup\n");
+    assert!(!test.host_log.exists());
+}
+
+#[test]
+fn rejects_unsupported_hosts_without_downloading_or_invoking_cargo() {
+    for (os, arch) in [("FreeBSD", "x86_64"), ("Linux", "riscv64"), ("Darwin", "powerpc")] {
+        let test = InstallerTest::new();
+        let destination = test.root.path().join("destination");
+        let output = test
+            .command(&["--version", "1.2.3", "--to", destination.to_str().unwrap()])
+            .env("TMUP_TEST_HOST_OS", os)
+            .env("TMUP_TEST_HOST_ARCH", arch)
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success(), "unsupported host {os}/{arch} was accepted");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        for target in [
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-musl",
+            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+        ] {
+            assert!(stderr.contains(target), "error omitted {target}: {stderr}");
+        }
+        assert!(!test.download_log.exists());
+        assert!(!test.cargo_log.exists());
+        assert!(!destination.exists());
     }
 }
 

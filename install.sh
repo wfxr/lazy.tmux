@@ -4,6 +4,8 @@ set -eu
 umask 077
 
 RELEASES_URL=https://github.com/wfxr/tmup/releases/download
+LATEST_RELEASE_URL=https://api.github.com/repos/wfxr/tmup/releases/latest
+SUPPORTED_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin'
 
 die() {
     printf 'tmup installer: %s\n' "$*" >&2
@@ -12,24 +14,92 @@ die() {
 
 usage() {
     cat <<'EOF'
-Install an explicit tmup release.
+Install the latest tmup release or an explicitly selected version.
 
 Usage:
-  install.sh --version <VERSION> --target <TARGET> --to <DIRECTORY> [--force]
+  install.sh [--version <VERSION>] [--target <TARGET>] [--to <DIRECTORY>] [--force]
 
 Options:
-  --version <VERSION>  Stable or prerelease version to install
-  --target <TARGET>    Supported Rust target triple to install
-  --to <DIRECTORY>     Directory in which to install tmup
+  --version <VERSION>  Stable or prerelease version (default: latest stable)
+  --target <TARGET>    Rust target triple (default: native host target)
+  --to <DIRECTORY>     Install directory (default: ~/.local/bin)
   --force              Replace an existing tmup binary
   --help               Show this help
 EOF
 }
 
 download() {
+    download_url=$1
+    download_output=$2
+    download_authorization=${3:-}
+
     case "$downloader" in
-    curl) curl --fail --location --silent --show-error --output "$2" "$1" ;;
-    wget) wget --quiet --output-document "$2" "$1" ;;
+    curl) set -- curl --fail --location --silent --show-error --output "$download_output" ;;
+    wget) set -- wget --quiet --output-document "$download_output" ;;
+    esac
+    if [ -n "$download_authorization" ]; then
+        set -- "$@" --header "$download_authorization"
+    fi
+    "$@" "$download_url"
+}
+
+validate_version() {
+    case "$version" in
+    v*) version=${version#v} ;;
+    esac
+
+    case "$version" in
+    *+*) die "SemVer build metadata is not supported: ${version}" ;;
+    esac
+    case "$version" in
+    *'
+'*) die "invalid tmup version: ${version}" ;;
+    esac
+    if ! printf '%s\n' "$version" | LC_ALL=C grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*)|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.((0|[1-9][0-9]*)|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?$'; then
+        die "invalid tmup version: ${version}"
+    fi
+}
+
+validate_target() {
+    case "$target" in
+    *[!0-9A-Za-z_-]*) ;;
+    *)
+        case " ${SUPPORTED_TARGETS} " in
+        *" ${target} "*) return 0 ;;
+        esac
+        ;;
+    esac
+    die "unsupported target ${target}; supported targets: ${SUPPORTED_TARGETS}"
+}
+
+detect_target() {
+    if ! host_os=$(uname -s); then
+        printf 'tmup installer: could not detect the host operating system; supported targets: %s\n' "$SUPPORTED_TARGETS" >&2
+        exit 1
+    fi
+    if ! host_arch=$(uname -m); then
+        printf 'tmup installer: could not detect the host architecture; supported targets: %s\n' "$SUPPORTED_TARGETS" >&2
+        exit 1
+    fi
+
+    case "${host_os}:${host_arch}" in
+    Linux:x86_64) target=x86_64-unknown-linux-musl ;;
+    Linux:aarch64) target=aarch64-unknown-linux-musl ;;
+    Darwin:arm64) target=aarch64-apple-darwin ;;
+    Darwin:x86_64)
+        translated=
+        if command -v sysctl >/dev/null 2>&1; then
+            translated=$(sysctl -n sysctl.proc_translated 2>/dev/null || :)
+        elif [ -x /usr/sbin/sysctl ]; then
+            translated=$(/usr/sbin/sysctl -n sysctl.proc_translated 2>/dev/null || :)
+        fi
+        if [ "$translated" = 1 ]; then
+            target=aarch64-apple-darwin
+        else
+            target=x86_64-apple-darwin
+        fi
+        ;;
+    *) die "unsupported host ${host_os}/${host_arch}; supported targets: ${SUPPORTED_TARGETS}" ;;
     esac
 }
 
@@ -93,9 +163,10 @@ main() {
 
     parse_args "$@"
 
-    [ -n "$version" ] || die "--version is required"
-    [ -n "$target" ] || die "--target is required"
-    [ -n "$destination" ] || die "--to is required"
+    if [ -z "$destination" ]; then
+        [ -n "${HOME:-}" ] || die "HOME is required when --to is omitted"
+        destination="${HOME}/.local/bin"
+    fi
     case "$destination" in
     -*) destination="./${destination}" ;;
     esac
@@ -105,31 +176,15 @@ main() {
         die "${destination_binary} already exists; pass --force to replace it"
     fi
 
-    case "$version" in
-    v*) version=${version#v} ;;
-    esac
-
-    case "$version" in
-    *+*) die "SemVer build metadata is not supported: ${version}" ;;
-    esac
-    case "$version" in
-    *'
-'*) die "invalid tmup version: ${version}" ;;
-    esac
-    if ! printf '%s\n' "$version" | LC_ALL=C grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*)|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.((0|[1-9][0-9]*)|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?$'; then
-        die "invalid tmup version: ${version}"
+    if [ -n "$version" ]; then
+        validate_version
     fi
 
-    case "$target" in
-    x86_64-unknown-linux-musl | aarch64-unknown-linux-musl | x86_64-apple-darwin | aarch64-apple-darwin) ;;
-    *)
-        die "unsupported target ${target}; supported targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl, x86_64-apple-darwin, aarch64-apple-darwin"
-        ;;
-    esac
-
-    archive_dir="tmup-v${version}-${target}"
-    archive_name="${archive_dir}.tar.gz"
-    release_url="${RELEASES_URL}/v${version}"
+    if [ -n "$target" ]; then
+        validate_target
+    else
+        detect_target
+    fi
 
     if command -v curl >/dev/null 2>&1; then
         downloader=curl
@@ -145,6 +200,39 @@ main() {
     if ! make_tmp_dir; then
         die "could not create temporary directory"
     fi
+
+    if [ -z "$version" ]; then
+        latest_release_path="${tmp_dir}/latest-release.json"
+        latest_download_status=0
+        latest_authorization=
+        if [ -n "${GITHUB_TOKEN:-}" ]; then
+            latest_authorization="Authorization: Bearer ${GITHUB_TOKEN}"
+        fi
+        # ShellCheck 0.11's data-flow analysis does not see the earlier definition here.
+        # shellcheck disable=SC2218
+        download "$LATEST_RELEASE_URL" "$latest_release_path" "$latest_authorization" || latest_download_status=$?
+        if [ "$latest_download_status" -ne 0 ]; then
+            printf 'tmup installer: failed to resolve the latest stable release\n' >&2
+            exit 1
+        fi
+        version=$(awk '
+match($0, /"tag_name"[[:space:]]*:[[:space:]]*"/) {
+    value = substr($0, RSTART + RLENGTH)
+    sub(/".*/, "", value)
+    print value
+    exit
+}
+' "$latest_release_path")
+        [ -n "$version" ] || die "latest release response has no tag_name"
+        validate_version
+        case "$version" in
+        *-*) die "latest release is not stable: v${version}" ;;
+        esac
+    fi
+
+    archive_dir="tmup-v${version}-${target}"
+    archive_name="${archive_dir}.tar.gz"
+    release_url="${RELEASES_URL}/v${version}"
     archive_path="${tmp_dir}/${archive_name}"
     checksums_path="${tmp_dir}/SHA256SUMS"
     expected_checksum_path="${tmp_dir}/EXPECTED_SHA256SUM"
@@ -225,6 +313,10 @@ main() {
     install_tmp=
 
     printf 'Installed tmup v%s to %s/tmup\n' "$version" "$destination"
+    case ":${PATH:-}:" in
+    *":${destination}:"*) ;;
+    *) printf 'tmup installer: warning: %s is not in PATH; add it to run tmup directly\n' "$destination" >&2 ;;
+    esac
 }
 
 main "$@"
