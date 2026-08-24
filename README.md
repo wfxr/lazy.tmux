@@ -54,7 +54,11 @@ lazy.nvim's design philosophy to tmux:
 
 ## Installation
 
+Install tmup from a pre-built binary or build it locally from source.
+
 ### From source
+
+Build and install tmup with your local Rust toolchain:
 
 ```bash
 cargo install --path .
@@ -62,7 +66,108 @@ cargo install --path .
 
 ### Pre-built binaries
 
-Coming soon.
+Pre-built binaries are available for 64-bit Linux and macOS. Linux releases use
+MUSL so the same target works across common Linux distributions.
+
+#### Remote installer
+
+Run the repository-owned installer over HTTPS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/wfxr/tmup/main/install.sh | sh
+```
+
+The installer selects the latest stable release and installs `tmup` to
+`~/.local/bin` by default. It verifies the downloaded archive against the
+release's `SHA256SUMS` before it changes the destination; verification is
+mandatory and can't be disabled.
+
+#### Installer options
+
+The installer supports deterministic overrides and help behavior. When you use
+the pipe command, pass options after `sh -s --`.
+
+| Option | Behavior |
+|--------|----------|
+| `--version <VERSION>` | Install an explicit stable or prerelease version, with or without a leading `v`; omit it to select the latest stable release |
+| `--to <DIRECTORY>` | Install to a specific directory instead of `~/.local/bin` |
+| `--force` | Replace an existing `tmup` binary; without this option, the installer refuses to overwrite it |
+| `--target <TARGET>` | Override host detection with one of the supported target triples |
+| `--help` | Print usage information and exit without installing |
+
+GitHub's latest-release selection excludes prereleases. To install a
+prerelease, request its exact version with `--version`, for example,
+`--version 0.2.0-rc.1`.
+
+#### Supported targets
+
+The installer supports only these operating system and architecture pairs:
+
+| Host | Release target |
+|------|----------------|
+| Linux x86-64 | `x86_64-unknown-linux-musl` |
+| Linux ARM64 | `aarch64-unknown-linux-musl` |
+| macOS Intel | `x86_64-apple-darwin` |
+| macOS Apple Silicon | `aarch64-apple-darwin` |
+
+Every other platform is a hard failure. The installer lists the supported
+targets and does not fall back to a source build.
+
+#### Manual installation
+
+You can download and verify the release assets directly instead of running the
+remote installer. The following example installs version `0.1.0` for Linux
+x86-64; replace `version` and `target` with the release and supported target you
+need.
+
+1. Select the versioned target archive:
+
+   ```sh
+   version=0.1.0
+   target=x86_64-unknown-linux-musl
+   archive_dir="tmup-v${version}-${target}"
+   archive="${archive_dir}.tar.gz"
+   release_url="https://github.com/wfxr/tmup/releases/download/v${version}"
+   ```
+
+2. Download the archive and its checksum manifest:
+
+   ```sh
+   curl --fail --location --remote-name "${release_url}/${archive}"
+   curl --fail --location --remote-name "${release_url}/SHA256SUMS"
+   grep -F "  ${archive}" SHA256SUMS > "${archive}.sha256"
+   ```
+
+3. Verify the archive with the SHA-256 tool for your platform. On Linux, run:
+
+   ```sh
+   sha256sum --check "${archive}.sha256"
+   ```
+
+   On macOS, run:
+
+   ```sh
+   shasum -a 256 --check "${archive}.sha256"
+   ```
+
+4. Verify the GitHub artifact attestations for both downloaded assets:
+
+   ```sh
+   gh attestation verify "${archive}" --repo wfxr/tmup
+   gh attestation verify SHA256SUMS --repo wfxr/tmup
+   ```
+
+   The checksums and attestations identify the official bytes produced by the
+   release workflow. They do not claim that separate builds are bit-for-bit
+   reproducible.
+
+5. Extract the versioned directory and install its single `tmup` executable:
+
+   ```sh
+   tar -xzf "${archive}"
+   mkdir -p "${HOME}/.local/bin"
+   install -m 755 "${archive_dir}/tmup" "${HOME}/.local/bin/tmup"
+   ```
 
 ## Quick Start
 
