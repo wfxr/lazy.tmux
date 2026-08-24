@@ -202,8 +202,21 @@ impl FakeGh {
         let gh = bin_dir.join("gh");
         std::fs::write(
         &gh,
-        r###"#!/bin/sh
+r###"#!/bin/sh
 set -eu
+
+has_slurp=false
+has_jq=false
+for argument in "$@"; do
+    case "$argument" in
+        --slurp) has_slurp=true ;;
+        --jq) has_jq=true ;;
+    esac
+done
+if [ "$has_slurp" = true ] && [ "$has_jq" = true ]; then
+    echo 'the `--slurp` option is not supported with `--jq` or `--template`' >&2
+    exit 1
+fi
 
 printf '%s\n' "$*" >> "$FAKE_GH_LOG"
 
@@ -214,6 +227,35 @@ case "$1:$2" in
                 [ "$(cat "$FAKE_GH_STATE")" = public ] || exit 1
                 ;;
         esac
+        if [ "$has_slurp" = true ] && [ "$has_jq" = false ]; then
+            case "$(cat "$FAKE_GH_STATE")" in
+                missing)
+                    printf '[[]]\n'
+                    ;;
+                draft) draft=true ;;
+                public) draft=false ;;
+                *) exit 2 ;;
+            esac
+            if [ "$(cat "$FAKE_GH_STATE")" != missing ]; then
+                printf '[[{"tag_name":"%s","draft":%s,"prerelease":%s,"assets":[' \
+                    "$FAKE_GH_TAG" "$draft" "$(cat "$FAKE_GH_PRERELEASE")"
+                separator=
+                if [ -f "$FAKE_GH_ASSETS" ]; then
+                    while IFS="$(printf '\t')" read -r name asset_state digest; do
+                        [ -n "$name" ] || continue
+                        label=
+                        if [ "$name" = SHA256SUMS ]; then
+                            label=$(cat "$FAKE_GH_LOCK_LABEL")
+                        fi
+                        printf '%s{"name":"%s","state":"%s","digest":"%s","label":"%s"}' \
+                            "$separator" "$name" "$asset_state" "$digest" "$label"
+                        separator=,
+                    done < "$FAKE_GH_ASSETS"
+                fi
+                printf ']}]]\n'
+            fi
+            exit 0
+        fi
         query=
         previous=
         for argument in "$@"; do
@@ -355,6 +397,7 @@ esac
             .arg(release)
             .env("PATH", format!("{}:{}", self.bin_dir.display(), std::env::var("PATH").unwrap()))
             .env("FAKE_GH_STATE", &self.state)
+            .env("FAKE_GH_TAG", tag)
             .env("FAKE_GH_PRERELEASE", self.root.join("gh-prerelease"))
             .env("FAKE_GH_ASSETS", &self.assets)
             .env("FAKE_GH_LOG", &self.log)

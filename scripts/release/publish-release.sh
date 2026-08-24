@@ -75,7 +75,8 @@ release_filter='add | map(select(.tag_name == "'"$tag"'"))'
 
 release_data() {
     filter=$1
-    gh api --paginate "$releases_endpoint" --slurp --jq "$release_filter | $filter"
+    release_pages=$(gh api --paginate "$releases_endpoint" --slurp) || return 1
+    printf '%s\n' "$release_pages" | jq --raw-output "$release_filter | $filter"
 }
 
 release_state() {
