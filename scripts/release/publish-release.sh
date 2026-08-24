@@ -83,6 +83,24 @@ release_state() {
     release_data 'if length == 0 then "missing" elif length > 1 then "duplicate" elif .[0].draft then "draft" else "public" end'
 }
 
+wait_for_created_draft() {
+    draft_visibility_attempts=0
+    while [ "$draft_visibility_attempts" -lt 10 ]; do
+        draft_visibility_state=$(release_state)
+        case "$draft_visibility_state" in
+            draft) return 0 ;;
+            missing) ;;
+            public) fail "release $tag became public before asset verification" ;;
+            *) fail "created release $tag has an invalid state: $draft_visibility_state" ;;
+        esac
+
+        draft_visibility_attempts=$((draft_visibility_attempts + 1))
+        [ "$draft_visibility_attempts" -lt 10 ] ||
+            fail "release $tag did not become visible as a draft"
+        [ "$draft_visibility_attempts" -eq 1 ] || sleep 1
+    done
+}
+
 state=$(release_state)
 case "$state" in
     missing)
@@ -91,6 +109,7 @@ case "$state" in
         else
             gh release create "$tag" --draft --generate-notes --verify-tag
         fi
+        wait_for_created_draft
         ;;
     draft) ;;
     public) fail "a public release already exists for $tag" ;;

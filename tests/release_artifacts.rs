@@ -178,6 +178,7 @@ struct FakeGh {
     run_status: PathBuf,
     after_lock: PathBuf,
     after_archive: PathBuf,
+    create_visibility_lag: PathBuf,
     log: PathBuf,
 }
 
@@ -190,6 +191,7 @@ impl FakeGh {
         let run_status = root.join("gh-run-status");
         let after_lock = root.join("gh-after-lock");
         let after_archive = root.join("gh-after-archive");
+        let create_visibility_lag = root.join("gh-create-visibility-lag");
         let log = root.join("gh.log");
         std::fs::create_dir(&bin_dir).unwrap();
         std::fs::write(&state, format!("{initial_state}\n")).unwrap();
@@ -198,6 +200,7 @@ impl FakeGh {
         std::fs::write(&run_status, "in_progress\n").unwrap();
         std::fs::write(&after_lock, "none\n").unwrap();
         std::fs::write(&after_archive, "none\n").unwrap();
+        std::fs::write(&create_visibility_lag, "0\n").unwrap();
 
         let gh = bin_dir.join("gh");
         std::fs::write(
@@ -228,6 +231,12 @@ case "$1:$2" in
                 ;;
         esac
         if [ "$has_slurp" = true ] && [ "$has_jq" = false ]; then
+            visibility_lag=$(cat "$FAKE_GH_CREATE_VISIBILITY_LAG")
+            if [ "$(cat "$FAKE_GH_STATE")" = draft ] && [ "$visibility_lag" -gt 0 ]; then
+                printf '%s\n' "$((visibility_lag - 1))" > "$FAKE_GH_CREATE_VISIBILITY_LAG"
+                printf '[[]]\n'
+                exit 0
+            fi
             case "$(cat "$FAKE_GH_STATE")" in
                 missing)
                     printf '[[]]\n'
@@ -381,6 +390,7 @@ esac
             run_status,
             after_lock,
             after_archive,
+            create_visibility_lag,
             log,
         }
     }
@@ -405,6 +415,7 @@ esac
             .env("FAKE_GH_RUN_STATUS", &self.run_status)
             .env("FAKE_GH_AFTER_LOCK", &self.after_lock)
             .env("FAKE_GH_AFTER_ARCHIVE", &self.after_archive)
+            .env("FAKE_GH_CREATE_VISIBILITY_LAG", &self.create_visibility_lag)
             .env("GITHUB_RUN_ID", "123")
             .env("GITHUB_RUN_ATTEMPT", "1");
         command
@@ -437,6 +448,10 @@ esac
 
     fn after_archive(&self, action: &str) {
         std::fs::write(&self.after_archive, format!("{action}\n")).unwrap();
+    }
+
+    fn delay_created_release_visibility(&self, queries: u32) {
+        std::fs::write(&self.create_visibility_lag, format!("{queries}\n")).unwrap();
     }
 }
 
@@ -801,6 +816,18 @@ fn release_publication_stages_assets_before_making_the_release_public() {
     assert!(calls[create..upload].contains("--draft"));
     assert!(calls[create..upload].contains("--generate-notes"));
     assert!(calls[publish..].contains("--draft=false"));
+}
+
+#[test]
+fn release_publication_waits_for_a_created_draft_to_become_visible() {
+    let temp = tempfile::tempdir().unwrap();
+    let release = prepare_release_assets(temp.path());
+    let fake_gh = FakeGh::new(temp.path(), "missing");
+    fake_gh.delay_created_release_visibility(1);
+
+    fake_gh.publish(&release).assert().success();
+
+    assert_eq!(fake_gh.state(), "public\n");
 }
 
 #[test]
