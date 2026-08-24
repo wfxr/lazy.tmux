@@ -22,10 +22,7 @@ version=$("$script_dir/validate-version.sh" "$tag")
 
 [ -d "$artifact_dir" ] || fail "artifact directory not found: $artifact_dir"
 
-targets='x86_64-unknown-linux-musl
-aarch64-unknown-linux-musl
-x86_64-apple-darwin
-aarch64-apple-darwin'
+targets=$("$script_dir/release-targets.sh")
 
 asset_count=0
 for path in "$artifact_dir"/* "$artifact_dir"/.[!.]* "$artifact_dir"/..?*; do

@@ -21,10 +21,7 @@ version=$("$script_dir/validate-version.sh" "$tag")
 
 [ -d "$asset_dir" ] || fail "asset directory not found: $asset_dir"
 
-targets='x86_64-unknown-linux-musl
-aarch64-unknown-linux-musl
-x86_64-apple-darwin
-aarch64-apple-darwin'
+targets=$("$script_dir/release-targets.sh")
 
 is_expected_asset() {
     candidate=$1
@@ -77,21 +74,35 @@ case "$version" in
     *) prerelease=false ;;
 esac
 
-release_endpoint="repos/{owner}/{repo}/releases/tags/$tag"
-if draft=$(gh api "$release_endpoint" --jq '.draft' 2>/dev/null); then
-    [ "$draft" = true ] || fail "a public release already exists for $tag"
-else
-    if [ "$prerelease" = true ]; then
-        gh release create "$tag" --draft --prerelease --latest=false --generate-notes --verify-tag
-    else
-        gh release create "$tag" --draft --generate-notes --verify-tag
-    fi
-fi
+releases_endpoint='repos/{owner}/{repo}/releases?per_page=100'
+release_filter='add | map(select(.tag_name == "'"$tag"'"))'
 
-draft=$(gh api "$release_endpoint" --jq '.draft')
-[ "$draft" = true ] || fail "release $tag is not a draft"
+release_data() {
+    filter=$1
+    gh api --paginate "$releases_endpoint" --slurp --jq "$release_filter | $filter"
+}
 
-current_prerelease=$(gh api "$release_endpoint" --jq '.prerelease')
+release_state() {
+    release_data 'if length == 0 then "missing" elif length > 1 then "duplicate" elif .[0].draft then "draft" else "public" end'
+}
+
+state=$(release_state)
+case "$state" in
+    missing)
+        if [ "$prerelease" = true ]; then
+            gh release create "$tag" --draft --prerelease --latest=false --generate-notes --verify-tag
+        else
+            gh release create "$tag" --draft --generate-notes --verify-tag
+        fi
+        ;;
+    draft) ;;
+    public) fail "a public release already exists for $tag" ;;
+    *) fail "expected one release for $tag, found an invalid state: $state" ;;
+esac
+
+[ "$(release_state)" = draft ] || fail "release $tag is not a draft"
+
+current_prerelease=$(release_data '.[0].prerelease')
 if [ "$current_prerelease" != "$prerelease" ]; then
     if [ "$prerelease" = true ]; then
         gh release edit "$tag" --prerelease --latest=false
@@ -100,10 +111,66 @@ if [ "$current_prerelease" != "$prerelease" ]; then
     fi
 fi
 
+run_id=${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}
+run_attempt=${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}
+lock_label="tmup-publication-run-${run_id}-attempt-${run_attempt}"
+checksum_digest=$(sha256sum "$checksum_path" | awk '{ print $1 }')
+
+release_lock() {
+    release_data '.[0].assets[] | select(.name == "SHA256SUMS") | [(.label // ""), .digest] | @tsv'
+}
+
+assert_draft() {
+    [ "$(release_state)" = draft ] || fail "release $tag is no longer a draft"
+}
+
+lock_record=$(release_lock)
+lock_owned=false
+if [ -n "$lock_record" ]; then
+    lock_owner=$(printf '%s\n' "$lock_record" | cut -f 1)
+    lock_digest=$(printf '%s\n' "$lock_record" | cut -f 2)
+    case "$lock_owner" in
+        tmup-publication-run-*-attempt-*) ;;
+        *) fail "draft SHA256SUMS has no valid publication owner" ;;
+    esac
+
+    owner=${lock_owner#tmup-publication-run-}
+    owner_run=${owner%%-attempt-*}
+    owner_attempt=${owner##*-attempt-}
+    case "$owner_run:$owner_attempt" in
+        *[!0-9:]* | :* | *:) fail "draft SHA256SUMS has an invalid publication owner" ;;
+    esac
+
+    if [ "$owner_run" = "$run_id" ]; then
+        if [ "$owner_attempt" = "$run_attempt" ] &&
+            [ "$lock_digest" = "sha256:$checksum_digest" ]; then
+            lock_owned=true
+        else
+            assert_draft
+            gh release delete-asset "$tag" SHA256SUMS --yes
+        fi
+    else
+        owner_status=$(gh api "repos/{owner}/{repo}/actions/runs/$owner_run" --jq '.status')
+        if [ "$owner_status" != completed ]; then
+            fail "publication run $owner_run is still active"
+        fi
+        assert_draft
+        gh release delete-asset "$tag" SHA256SUMS --yes
+    fi
+fi
+
+if [ "$lock_owned" = false ]; then
+    assert_draft
+    gh release upload "$tag" "$checksum_path#$lock_label"
+    expected_lock="${lock_label}\tsha256:${checksum_digest}"
+    [ "$(release_lock)" = "$(printf '%b' "$expected_lock")" ] ||
+        fail "failed to acquire draft publication ownership"
+fi
+
 temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/tmup-publish.XXXXXX")
 trap 'rm -rf "$temporary_dir"' EXIT HUP INT TERM
 
-gh api "$release_endpoint" --jq '.assets[].name' >"$temporary_dir/remote-names"
+release_data '.[0].assets[].name' >"$temporary_dir/remote-names"
 while IFS= read -r remote_name; do
     [ -n "$remote_name" ] || continue
     if ! is_expected_asset "$remote_name"; then
@@ -115,9 +182,10 @@ set --
 for target in $targets; do
     set -- "$@" "$asset_dir/tmup-v${version}-${target}.tar.gz"
 done
-set -- "$@" "$checksum_path"
 
+assert_draft
 gh release upload "$tag" "$@" --clobber
+set -- "$@" "$checksum_path"
 
 for path in "$@"; do
     name=$(basename "$path")
@@ -125,13 +193,18 @@ for path in "$@"; do
     printf '%s\tuploaded\tsha256:%s\n' "$name" "$digest"
 done | LC_ALL=C sort >"$temporary_dir/expected-assets"
 
-gh api "$release_endpoint" --jq '.assets[] | [.name, .state, .digest] | @tsv' |
+release_data '.[0].assets[] | [.name, .state, .digest] | @tsv' |
     LC_ALL=C sort >"$temporary_dir/remote-assets"
 
 if ! cmp -s "$temporary_dir/expected-assets" "$temporary_dir/remote-assets"; then
     diff -u "$temporary_dir/expected-assets" "$temporary_dir/remote-assets" >&2 || true
     fail "uploaded release assets do not match the verified local asset set"
 fi
+
+assert_draft
+expected_lock="${lock_label}\tsha256:${checksum_digest}"
+[ "$(release_lock)" = "$(printf '%b' "$expected_lock")" ] ||
+    fail "draft publication ownership changed before publish"
 
 if [ "$prerelease" = true ]; then
     gh release edit "$tag" --draft=false --prerelease --latest=false

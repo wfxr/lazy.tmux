@@ -16,26 +16,37 @@ fn release_script(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/release").join(name)
 }
 
+fn release_scripts_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/release")
+}
+
 fn package_tag() -> String {
     format!("v{}", env!("CARGO_PKG_VERSION"))
 }
 
-fn fake_release_binary(path: &std::path::Path) {
-    std::fs::write(path, format!("#!/bin/sh\nprintf 'tmup {}\\n'\n", env!("CARGO_PKG_VERSION")))
-        .unwrap();
+fn fake_release_binary_for_version(path: &std::path::Path, version: &str) {
+    std::fs::write(path, format!("#!/bin/sh\nprintf 'tmup {version}\\n'\n")).unwrap();
     let mut permissions = std::fs::metadata(path).unwrap().permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(path, permissions).unwrap();
 }
 
 fn package_release_archives(root: &std::path::Path) -> PathBuf {
+    package_release_archives_with(root, &release_scripts_dir(), env!("CARGO_PKG_VERSION"))
+}
+
+fn package_release_archives_with(
+    root: &std::path::Path,
+    scripts: &std::path::Path,
+    version: &str,
+) -> PathBuf {
     let downloads = root.join("downloads");
     let binary = root.join("tmup");
-    fake_release_binary(&binary);
+    fake_release_binary_for_version(&binary, version);
 
     for target in RELEASE_TARGETS {
-        Command::new(release_script("package.sh"))
-            .arg(package_tag())
+        Command::new(scripts.join("package.sh"))
+            .arg(format!("v{version}"))
             .arg(target)
             .arg(&binary)
             .arg(&downloads)
@@ -44,6 +55,36 @@ fn package_release_archives(root: &std::path::Path) -> PathBuf {
     }
 
     downloads
+}
+
+fn isolated_release_scripts(root: &std::path::Path, version: &str) -> PathBuf {
+    let project = root.join("isolated-project");
+    let scripts = project.join("scripts/release");
+    std::fs::create_dir_all(&scripts).unwrap();
+    std::fs::write(
+        project.join("Cargo.toml"),
+        format!("[package]\nname = \"tmup\"\nversion = \"{version}\"\nedition = \"2024\"\n"),
+    )
+    .unwrap();
+
+    for entry in std::fs::read_dir(release_scripts_dir()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), scripts.join(entry.file_name())).unwrap();
+    }
+
+    scripts
+}
+
+fn prepare_release_assets(root: &std::path::Path) -> PathBuf {
+    let downloads = package_release_archives(root);
+    let release = root.join("release");
+    Command::new(release_script("prepare-assets.sh"))
+        .arg(package_tag())
+        .arg(downloads)
+        .arg(&release)
+        .assert()
+        .success();
+    release
 }
 
 fn git(root: &std::path::Path, args: &[&str]) -> String {
@@ -84,16 +125,26 @@ fn release_tag_repo(tag_kind: &str) -> tempfile::TempDir {
     repo
 }
 
-fn fake_gh(root: &std::path::Path, initial_state: &str) -> (PathBuf, PathBuf, PathBuf) {
-    let bin_dir = root.join("bin");
-    let state = root.join("gh-state");
-    let log = root.join("gh.log");
-    std::fs::create_dir(&bin_dir).unwrap();
-    std::fs::write(&state, format!("{initial_state}\n")).unwrap();
-    std::fs::write(root.join("gh-prerelease"), "false\n").unwrap();
+struct FakeGh {
+    root: PathBuf,
+    bin_dir: PathBuf,
+    state: PathBuf,
+    log: PathBuf,
+}
 
-    let gh = bin_dir.join("gh");
-    std::fs::write(
+impl FakeGh {
+    fn new(root: &std::path::Path, initial_state: &str) -> Self {
+        let bin_dir = root.join("bin");
+        let state = root.join("gh-state");
+        let log = root.join("gh.log");
+        std::fs::create_dir(&bin_dir).unwrap();
+        std::fs::write(&state, format!("{initial_state}\n")).unwrap();
+        std::fs::write(root.join("gh-prerelease"), "false\n").unwrap();
+        std::fs::write(root.join("gh-lock-label"), "\n").unwrap();
+        std::fs::write(root.join("gh-run-status"), "in_progress\n").unwrap();
+
+        let gh = bin_dir.join("gh");
+        std::fs::write(
         &gh,
         r###"#!/bin/sh
 set -eu
@@ -102,7 +153,11 @@ printf '%s\n' "$*" >> "$FAKE_GH_LOG"
 
 case "$1:$2" in
     api:*)
-        [ "$(cat "$FAKE_GH_STATE")" != missing ] || exit 1
+        case "$2" in
+            */releases/tags/*)
+                [ "$(cat "$FAKE_GH_STATE")" = public ] || exit 1
+                ;;
+        esac
         query=
         previous=
         for argument in "$@"; do
@@ -113,25 +168,31 @@ case "$1:$2" in
             previous=$argument
         done
         case "$query" in
-            .draft)
-                if [ "$(cat "$FAKE_GH_STATE")" = draft ]; then
-                    echo true
-                else
-                    echo false
-                fi
+            *'if length == 0'*)
+                cat "$FAKE_GH_STATE"
                 ;;
-            .prerelease)
+            *'.[0].prerelease'*)
                 cat "$FAKE_GH_PRERELEASE"
                 ;;
-            '.assets[].name')
+            *'select(.name == "SHA256SUMS")'*)
+                if [ -f "$FAKE_GH_ASSETS" ] &&
+                    awk -F '\t' '$1 == "SHA256SUMS" { found = 1 } END { exit !found }' "$FAKE_GH_ASSETS"; then
+                    digest=$(awk -F '\t' '$1 == "SHA256SUMS" { print $3 }' "$FAKE_GH_ASSETS")
+                    printf '%s\t%s\n' "$(cat "$FAKE_GH_LOCK_LABEL")" "$digest"
+                fi
+                ;;
+            *'.assets[].name')
                 if [ -f "$FAKE_GH_ASSETS" ]; then
                     cut -f 1 "$FAKE_GH_ASSETS"
                 fi
                 ;;
-            '.assets[] | [.name, .state, .digest] | @tsv')
+            *'.assets[] | [.name, .state, .digest] | @tsv')
                 if [ -f "$FAKE_GH_ASSETS" ]; then
                     cat "$FAKE_GH_ASSETS"
                 fi
+                ;;
+            .status)
+                cat "$FAKE_GH_RUN_STATUS"
                 ;;
             *)
                 echo "unsupported fake gh api query: $query" >&2
@@ -154,14 +215,27 @@ case "$1:$2" in
         temporary="$FAKE_GH_ASSETS.tmp"
         awk -F '\t' -v name="$asset_name" '$1 != name' "$FAKE_GH_ASSETS" > "$temporary"
         mv "$temporary" "$FAKE_GH_ASSETS"
+        if [ "$asset_name" = SHA256SUMS ]; then
+            echo > "$FAKE_GH_LOCK_LABEL"
+        fi
         ;;
     release:upload)
-        : > "$FAKE_GH_ASSETS"
+        touch "$FAKE_GH_ASSETS"
         for argument in "$@"; do
-            if [ -f "$argument" ]; then
-                name=$(basename "$argument")
-                digest=$(sha256sum "$argument" | awk '{ print $1 }')
+            path=${argument%%#*}
+            if [ -f "$path" ]; then
+                name=$(basename "$path")
+                temporary="$FAKE_GH_ASSETS.tmp"
+                awk -F '\t' -v name="$name" '$1 != name' "$FAKE_GH_ASSETS" > "$temporary"
+                mv "$temporary" "$FAKE_GH_ASSETS"
+                digest=$(sha256sum "$path" | awk '{ print $1 }')
                 printf '%s\tuploaded\tsha256:%s\n' "$name" "$digest" >> "$FAKE_GH_ASSETS"
+                if [ "$name" = SHA256SUMS ]; then
+                    case "$argument" in
+                        *'#'*) printf '%s\n' "${argument#*#}" > "$FAKE_GH_LOCK_LABEL" ;;
+                        *) echo > "$FAKE_GH_LOCK_LABEL" ;;
+                    esac
+                fi
             fi
         done
         ;;
@@ -188,30 +262,46 @@ esac
 "###,
     )
     .unwrap();
-    let mut permissions = std::fs::metadata(&gh).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&gh, permissions).unwrap();
+        let mut permissions = std::fs::metadata(&gh).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).unwrap();
 
-    (bin_dir, state, log)
-}
+        Self { root: root.to_path_buf(), bin_dir, state, log }
+    }
 
-fn publish_command(
-    bin_dir: &std::path::Path,
-    root: &std::path::Path,
-    state: &std::path::Path,
-    log: &std::path::Path,
-    release: &std::path::Path,
-) -> Command {
-    let mut command = Command::new(release_script("publish-release.sh"));
-    command
-        .arg(package_tag())
-        .arg(release)
-        .env("PATH", format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap()))
-        .env("FAKE_GH_STATE", state)
-        .env("FAKE_GH_PRERELEASE", root.join("gh-prerelease"))
-        .env("FAKE_GH_ASSETS", root.join("gh-assets"))
-        .env("FAKE_GH_LOG", log);
-    command
+    fn publish_command(
+        &self,
+        script: &std::path::Path,
+        tag: &str,
+        release: &std::path::Path,
+    ) -> Command {
+        let mut command = Command::new(script);
+        command
+            .arg(tag)
+            .arg(release)
+            .env("PATH", format!("{}:{}", self.bin_dir.display(), std::env::var("PATH").unwrap()))
+            .env("FAKE_GH_STATE", &self.state)
+            .env("FAKE_GH_PRERELEASE", self.root.join("gh-prerelease"))
+            .env("FAKE_GH_ASSETS", self.root.join("gh-assets"))
+            .env("FAKE_GH_LOG", &self.log)
+            .env("FAKE_GH_LOCK_LABEL", self.root.join("gh-lock-label"))
+            .env("FAKE_GH_RUN_STATUS", self.root.join("gh-run-status"))
+            .env("GITHUB_RUN_ID", "123")
+            .env("GITHUB_RUN_ATTEMPT", "1");
+        command
+    }
+
+    fn publish(&self, release: &std::path::Path) -> Command {
+        self.publish_command(&release_script("publish-release.sh"), &package_tag(), release)
+    }
+
+    fn state(&self) -> String {
+        std::fs::read_to_string(&self.state).unwrap()
+    }
+
+    fn calls(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap()
+    }
 }
 
 #[test]
@@ -474,22 +564,33 @@ fn release_tag_validation_rejects_a_commit_outside_origin_main() {
 }
 
 #[test]
+fn release_tag_validation_rejects_a_tag_for_a_different_workflow_commit() {
+    let repo = release_tag_repo("lightweight");
+    std::fs::write(repo.path().join("later-main"), "later\n").unwrap();
+    git(repo.path(), &["add", "later-main"]);
+    git(repo.path(), &["commit", "--quiet", "-m", "advance main"]);
+    git(repo.path(), &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let workflow_commit = git(repo.path(), &["rev-parse", "HEAD"]);
+
+    Command::new(release_script("validate-release-tag.sh"))
+        .arg(package_tag())
+        .arg(&workflow_commit)
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(format!("instead of workflow commit {workflow_commit}")));
+}
+
+#[test]
 fn release_publication_stages_assets_before_making_the_release_public() {
     let temp = tempfile::tempdir().unwrap();
-    let downloads = package_release_archives(temp.path());
-    let release = temp.path().join("release");
-    Command::new(release_script("prepare-assets.sh"))
-        .arg(package_tag())
-        .arg(&downloads)
-        .arg(&release)
-        .assert()
-        .success();
-    let (bin_dir, state, log) = fake_gh(temp.path(), "missing");
+    let release = prepare_release_assets(temp.path());
+    let fake_gh = FakeGh::new(temp.path(), "missing");
 
-    publish_command(&bin_dir, temp.path(), &state, &log, &release).assert().success();
+    fake_gh.publish(&release).assert().success();
 
-    assert_eq!(std::fs::read_to_string(&state).unwrap(), "public\n");
-    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(fake_gh.state(), "public\n");
+    let calls = fake_gh.calls();
     let create = calls.find("release create").expect("release should be created as a draft");
     let upload = calls.find("release upload").expect("release assets should be uploaded");
     let publish =
@@ -503,25 +604,18 @@ fn release_publication_stages_assets_before_making_the_release_public() {
 #[test]
 fn release_publication_repairs_the_existing_draft() {
     let temp = tempfile::tempdir().unwrap();
-    let downloads = package_release_archives(temp.path());
-    let release = temp.path().join("release");
-    Command::new(release_script("prepare-assets.sh"))
-        .arg(package_tag())
-        .arg(&downloads)
-        .arg(&release)
-        .assert()
-        .success();
-    let (bin_dir, state, log) = fake_gh(temp.path(), "draft");
+    let release = prepare_release_assets(temp.path());
+    let fake_gh = FakeGh::new(temp.path(), "draft");
     std::fs::write(
         temp.path().join("gh-assets"),
         "stale.txt\tuploaded\tsha256:0000000000000000000000000000000000000000000000000000000000000000\n",
     )
     .unwrap();
 
-    publish_command(&bin_dir, temp.path(), &state, &log, &release).assert().success();
+    fake_gh.publish(&release).assert().success();
 
-    assert_eq!(std::fs::read_to_string(&state).unwrap(), "public\n");
-    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(fake_gh.state(), "public\n");
+    let calls = fake_gh.calls();
     assert!(!calls.contains("release create"), "rerun should reuse the draft:\n{calls}");
     assert!(calls.contains("release delete-asset"));
     assert!(calls.contains("release upload"));
@@ -531,22 +625,93 @@ fn release_publication_repairs_the_existing_draft() {
 #[test]
 fn release_publication_refuses_to_mutate_a_public_release() {
     let temp = tempfile::tempdir().unwrap();
-    let downloads = package_release_archives(temp.path());
+    let release = prepare_release_assets(temp.path());
+    let fake_gh = FakeGh::new(temp.path(), "public");
+
+    fake_gh.publish(&release).assert().failure().stderr(predicate::str::contains(format!(
+        "a public release already exists for {}",
+        package_tag()
+    )));
+
+    assert_eq!(fake_gh.state(), "public\n");
+    let calls = fake_gh.calls();
+    assert!(!calls.contains("release upload"));
+    assert!(!calls.contains("release edit"));
+}
+
+#[test]
+fn release_publication_refuses_to_race_an_active_tag_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let release = prepare_release_assets(temp.path());
+    let fake_gh = FakeGh::new(temp.path(), "draft");
+    std::fs::write(
+        temp.path().join("gh-assets"),
+        "SHA256SUMS\tuploaded\tsha256:0000000000000000000000000000000000000000000000000000000000000000\n",
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("gh-lock-label"), "tmup-publication-run-999-attempt-1\n")
+        .unwrap();
+
+    fake_gh
+        .publish(&release)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("publication run 999 is still active"));
+
+    assert_eq!(fake_gh.state(), "draft\n");
+    let calls = fake_gh.calls();
+    assert!(!calls.contains("release upload"));
+    assert!(!calls.contains("--draft=false"));
+}
+
+#[test]
+fn release_publication_takes_over_a_completed_run_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let release = prepare_release_assets(temp.path());
+    let fake_gh = FakeGh::new(temp.path(), "draft");
+    std::fs::write(
+        temp.path().join("gh-assets"),
+        "SHA256SUMS\tuploaded\tsha256:0000000000000000000000000000000000000000000000000000000000000000\n",
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("gh-lock-label"), "tmup-publication-run-999-attempt-1\n")
+        .unwrap();
+    std::fs::write(temp.path().join("gh-run-status"), "completed\n").unwrap();
+
+    fake_gh.publish(&release).assert().success();
+
+    assert_eq!(fake_gh.state(), "public\n");
+    let calls = fake_gh.calls();
+    assert!(calls.contains("actions/runs/999"));
+    assert!(calls.contains("release delete-asset"));
+    assert!(calls.contains("release upload"));
+}
+
+#[test]
+fn release_publication_marks_prereleases_without_replacing_latest() {
+    let temp = tempfile::tempdir().unwrap();
+    let version = "0.1.0-rc.1";
+    let tag = format!("v{version}");
+    let scripts = isolated_release_scripts(temp.path(), version);
+    let downloads = package_release_archives_with(temp.path(), &scripts, version);
     let release = temp.path().join("release");
-    Command::new(release_script("prepare-assets.sh"))
-        .arg(package_tag())
+    Command::new(scripts.join("prepare-assets.sh"))
+        .arg(&tag)
         .arg(&downloads)
         .arg(&release)
         .assert()
         .success();
-    let (bin_dir, state, log) = fake_gh(temp.path(), "public");
+    let fake_gh = FakeGh::new(temp.path(), "missing");
 
-    publish_command(&bin_dir, temp.path(), &state, &log, &release).assert().failure().stderr(
-        predicate::str::contains(format!("a public release already exists for {}", package_tag())),
-    );
+    fake_gh.publish_command(&scripts.join("publish-release.sh"), &tag, &release).assert().success();
 
-    assert_eq!(std::fs::read_to_string(&state).unwrap(), "public\n");
-    let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(!calls.contains("release upload"));
-    assert!(!calls.contains("release edit"));
+    assert_eq!(std::fs::read_to_string(temp.path().join("gh-prerelease")).unwrap(), "true\n");
+    let calls = fake_gh.calls();
+    let create = calls.find("release create").unwrap();
+    let upload = calls.find("release upload").unwrap();
+    let publish = calls.rfind("release edit").unwrap();
+    assert!(calls[create..upload].contains("--prerelease"));
+    assert!(calls[create..upload].contains("--latest=false"));
+    assert!(calls[publish..].contains("--prerelease"));
+    assert!(calls[publish..].contains("--latest=false"));
 }
