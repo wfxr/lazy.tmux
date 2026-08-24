@@ -564,6 +564,33 @@ fn rejects_versions_outside_the_release_semver_contract() {
 }
 
 #[test]
+fn rejects_empty_explicit_version_and_target_values_before_download() {
+    let cases = [
+        ("--version", ["--version", "", "--target", TARGET]),
+        ("--target", ["--version", "1.2.3", "--target", ""]),
+    ];
+
+    for (option, args) in cases {
+        let test = InstallerTest::new();
+        let destination = test.root.path().join("destination");
+        let mut args = args.to_vec();
+        args.extend(["--to", destination.to_str().unwrap()]);
+
+        let output = test.run(&args);
+
+        assert!(!output.status.success(), "empty {option} value was accepted");
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains(&format!("{option} requires a non-empty value"))
+        );
+        assert!(!test.download_log.exists());
+        assert!(!test.host_log.exists());
+        assert!(!destination.exists());
+    }
+}
+
+#[test]
 fn rejects_unsupported_explicit_targets_with_the_supported_list() {
     let test = InstallerTest::new();
     let destination = test.root.path().join("destination");

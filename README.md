@@ -74,7 +74,7 @@ MUSL so the same target works across common Linux distributions.
 Run the repository-owned installer over HTTPS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/wfxr/tmup/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/wfxr/tmup/main/install.sh | sh
 ```
 
 The installer selects the latest stable release and installs `tmup` to

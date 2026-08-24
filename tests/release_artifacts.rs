@@ -5,13 +5,6 @@ use std::path::PathBuf;
 use assert_cmd::Command;
 use predicates::prelude::*;
 
-const RELEASE_TARGETS: [&str; 4] = [
-    "x86_64-unknown-linux-musl",
-    "aarch64-unknown-linux-musl",
-    "x86_64-apple-darwin",
-    "aarch64-apple-darwin",
-];
-
 fn release_script(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/release").join(name)
 }
@@ -22,6 +15,16 @@ fn release_scripts_dir() -> PathBuf {
 
 fn package_tag() -> String {
     format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
+fn release_targets_from(scripts: &std::path::Path) -> Vec<String> {
+    let output = std::process::Command::new(scripts.join("release-targets.sh")).output().unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().lines().map(str::to_owned).collect()
+}
+
+fn release_targets() -> Vec<String> {
+    release_targets_from(&release_scripts_dir())
 }
 
 fn fake_release_binary_for_version(path: &std::path::Path, version: &str) {
@@ -35,6 +38,35 @@ fn package_release_archives(root: &std::path::Path) -> PathBuf {
     package_release_archives_with(root, &release_scripts_dir(), env!("CARGO_PKG_VERSION"))
 }
 
+fn package_unrunnable_release_archives(root: &std::path::Path) -> PathBuf {
+    let downloads = root.join("downloads");
+    let payloads = root.join("payloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+
+    for target in release_targets() {
+        let package_name = format!("tmup-v{}-{target}", env!("CARGO_PKG_VERSION"));
+        let package_dir = payloads.join(&package_name);
+        std::fs::create_dir_all(&package_dir).unwrap();
+        let binary = package_dir.join("tmup");
+        std::fs::write(&binary, "#!/bin/sh\nexit 91\n").unwrap();
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+
+        let status = std::process::Command::new("tar")
+            .args(["-czf"])
+            .arg(downloads.join(format!("{package_name}.tar.gz")))
+            .arg("-C")
+            .arg(&payloads)
+            .arg(&package_name)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    downloads
+}
+
 fn package_release_archives_with(
     root: &std::path::Path,
     scripts: &std::path::Path,
@@ -44,10 +76,10 @@ fn package_release_archives_with(
     let binary = root.join("tmup");
     fake_release_binary_for_version(&binary, version);
 
-    for target in RELEASE_TARGETS {
+    for target in release_targets_from(scripts) {
         Command::new(scripts.join("package.sh"))
             .arg(format!("v{version}"))
-            .arg(target)
+            .arg(&target)
             .arg(&binary)
             .arg(&downloads)
             .assert()
@@ -77,6 +109,18 @@ fn isolated_release_scripts(root: &std::path::Path, version: &str) -> PathBuf {
 
 fn prepare_release_assets(root: &std::path::Path) -> PathBuf {
     let downloads = package_release_archives(root);
+    let release = root.join("release");
+    Command::new(release_script("prepare-assets.sh"))
+        .arg(package_tag())
+        .arg(downloads)
+        .arg(&release)
+        .assert()
+        .success();
+    release
+}
+
+fn prepare_unrunnable_release_assets(root: &std::path::Path) -> PathBuf {
+    let downloads = package_unrunnable_release_archives(root);
     let release = root.join("release");
     Command::new(release_script("prepare-assets.sh"))
         .arg(package_tag())
@@ -407,6 +451,52 @@ fn version_validation_rejects_a_package_version_mismatch() {
 }
 
 #[test]
+fn target_validation_rejects_unknown_well_formed_targets() {
+    Command::new(release_script("validate-target.sh"))
+        .arg("x86_64-unknown-linux-gnu")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unsupported release target"))
+        .stderr(predicate::str::contains("x86_64-unknown-linux-musl"))
+        .stderr(predicate::str::contains("aarch64-unknown-linux-musl"))
+        .stderr(predicate::str::contains("x86_64-apple-darwin"))
+        .stderr(predicate::str::contains("aarch64-apple-darwin"));
+}
+
+#[test]
+fn release_target_contract_exposes_the_native_runner_matrix() {
+    Command::new(release_script("release-targets.sh"))
+        .arg("--github-matrix")
+        .assert()
+        .success()
+        .stdout(concat!(
+            r#"{"include":["#,
+            r#"{"target":"x86_64-unknown-linux-musl","runner":"ubuntu-24.04","macos_deployment_target":""},"#,
+            r#"{"target":"aarch64-unknown-linux-musl","runner":"ubuntu-24.04-arm","macos_deployment_target":""},"#,
+            r#"{"target":"x86_64-apple-darwin","runner":"macos-15-intel","macos_deployment_target":"10.12"},"#,
+            r#"{"target":"aarch64-apple-darwin","runner":"macos-15","macos_deployment_target":"11.0"}"#,
+            "]}\n",
+        ));
+}
+
+#[test]
+fn installer_target_contract_is_generated_from_release_targets() {
+    Command::new(release_script("sync-installer-targets.sh")).arg("--check").assert().success();
+}
+
+#[test]
+fn readme_documents_the_hardened_remote_installer_command() {
+    let readme =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md"))
+            .unwrap();
+
+    assert!(readme.contains(concat!(
+        "curl --proto '=https' --tlsv1.2 -LsSf ",
+        "https://raw.githubusercontent.com/wfxr/tmup/main/install.sh | sh",
+    )));
+}
+
+#[test]
 fn local_packaging_produces_the_single_binary_archive_contract() {
     let temp = tempfile::tempdir().unwrap();
     let output_dir = temp.path().join("dist");
@@ -529,7 +619,8 @@ fn release_asset_preparation_generates_the_complete_checksum_manifest() {
     asset_names.sort();
 
     let version = env!("CARGO_PKG_VERSION");
-    let mut expected_names = RELEASE_TARGETS
+    let targets = release_targets();
+    let mut expected_names = targets
         .iter()
         .map(|target| format!("tmup-v{version}-{target}.tar.gz"))
         .chain(std::iter::once("SHA256SUMS".to_string()))
@@ -544,10 +635,7 @@ fn release_asset_preparation_generates_the_complete_checksum_manifest() {
         .collect::<Vec<_>>();
     assert_eq!(
         checksum_names,
-        RELEASE_TARGETS
-            .iter()
-            .map(|target| format!("tmup-v{version}-{target}.tar.gz"))
-            .collect::<Vec<_>>()
+        targets.iter().map(|target| format!("tmup-v{version}-{target}.tar.gz")).collect::<Vec<_>>()
     );
 
     let verification = std::process::Command::new("sha256sum")
@@ -561,6 +649,22 @@ fn release_asset_preparation_generates_the_complete_checksum_manifest() {
         "generated checksum manifest should verify: {}",
         String::from_utf8_lossy(&verification.stderr)
     );
+}
+
+#[test]
+fn release_asset_preparation_does_not_execute_native_binaries() {
+    let temp = tempfile::tempdir().unwrap();
+    let downloads = package_unrunnable_release_archives(temp.path());
+    let release = temp.path().join("release");
+
+    Command::new(release_script("prepare-assets.sh"))
+        .arg(package_tag())
+        .arg(downloads)
+        .arg(&release)
+        .assert()
+        .success();
+
+    assert!(release.join("SHA256SUMS").is_file());
 }
 
 #[test]
@@ -654,6 +758,17 @@ fn release_publication_stages_assets_before_making_the_release_public() {
     assert!(calls[create..upload].contains("--draft"));
     assert!(calls[create..upload].contains("--generate-notes"));
     assert!(calls[publish..].contains("--draft=false"));
+}
+
+#[test]
+fn release_publication_does_not_execute_native_binaries() {
+    let temp = tempfile::tempdir().unwrap();
+    let release = prepare_unrunnable_release_assets(temp.path());
+    let fake_gh = FakeGh::new(temp.path(), "missing");
+
+    fake_gh.publish(&release).assert().success();
+
+    assert_eq!(fake_gh.state(), "public\n");
 }
 
 #[test]

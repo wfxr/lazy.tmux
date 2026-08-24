@@ -24,7 +24,6 @@ version=$("$script_dir/validate-version.sh" "$tag")
 
 targets=$("$script_dir/release-targets.sh")
 
-asset_count=0
 for path in "$artifact_dir"/* "$artifact_dir"/.[!.]* "$artifact_dir"/..?*; do
     if [ ! -e "$path" ] && [ ! -L "$path" ]; then
         continue
@@ -40,7 +39,6 @@ for path in "$artifact_dir"/* "$artifact_dir"/.[!.]* "$artifact_dir"/..?*; do
         fi
     done
     [ "$expected" = true ] || fail "unexpected asset: $name"
-    asset_count=$((asset_count + 1))
 done
 
 for target in $targets; do
@@ -48,8 +46,6 @@ for target in $targets; do
     source_path="$artifact_dir/$name"
     [ -f "$source_path" ] && [ ! -L "$source_path" ] || fail "missing asset: $name"
 done
-
-[ "$asset_count" -eq 4 ] || fail "expected four archives, found $asset_count"
 
 if [ -e "$output_dir" ]; then
     [ -d "$output_dir" ] || fail "output path is not a directory: $output_dir"
@@ -64,7 +60,7 @@ trap 'rm -rf "$staging_dir"' EXIT HUP INT TERM
 for target in $targets; do
     name="tmup-v${version}-${target}.tar.gz"
     source_path="$artifact_dir/$name"
-    "$script_dir/validate-archive.sh" "$tag" "$target" "$source_path"
+    "$script_dir/validate-archive.sh" --structure-only "$tag" "$target" "$source_path"
     cp "$source_path" "$staging_dir/$name"
 done
 

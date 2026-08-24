@@ -5,7 +5,19 @@ umask 077
 
 RELEASES_URL=https://github.com/wfxr/tmup/releases/download
 LATEST_RELEASE_URL=https://api.github.com/repos/wfxr/tmup/releases/latest
+# BEGIN GENERATED RELEASE TARGETS
 SUPPORTED_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin'
+
+release_target_for_host() {
+    case "$1:$2" in
+    Linux:x86_64) printf '%s\n' 'x86_64-unknown-linux-musl' ;;
+    Linux:aarch64) printf '%s\n' 'aarch64-unknown-linux-musl' ;;
+    Darwin:x86_64) printf '%s\n' 'x86_64-apple-darwin' ;;
+    Darwin:arm64) printf '%s\n' 'aarch64-apple-darwin' ;;
+    *) return 1 ;;
+    esac
+}
+# END GENERATED RELEASE TARGETS
 
 die() {
     printf 'tmup installer: %s\n' "$*" >&2
@@ -82,11 +94,7 @@ detect_target() {
         exit 1
     fi
 
-    case "${host_os}:${host_arch}" in
-    Linux:x86_64) target=x86_64-unknown-linux-musl ;;
-    Linux:aarch64) target=aarch64-unknown-linux-musl ;;
-    Darwin:arm64) target=aarch64-apple-darwin ;;
-    Darwin:x86_64)
+    if [ "$host_os" = Darwin ] && [ "$host_arch" = x86_64 ]; then
         translated=
         if command -v sysctl >/dev/null 2>&1; then
             translated=$(sysctl -n sysctl.proc_translated 2>/dev/null || :)
@@ -94,13 +102,13 @@ detect_target() {
             translated=$(/usr/sbin/sysctl -n sysctl.proc_translated 2>/dev/null || :)
         fi
         if [ "$translated" = 1 ]; then
-            target=aarch64-apple-darwin
-        else
-            target=x86_64-apple-darwin
+            host_arch=arm64
         fi
-        ;;
-    *) die "unsupported host ${host_os}/${host_arch}; supported targets: ${SUPPORTED_TARGETS}" ;;
-    esac
+    fi
+
+    if ! target=$(release_target_for_host "$host_os" "$host_arch"); then
+        die "unsupported host ${host_os}/${host_arch}; supported targets: ${SUPPORTED_TARGETS}"
+    fi
 }
 
 tmp_dir=
@@ -127,11 +135,13 @@ parse_args() {
         case "$1" in
         --version)
             [ "$#" -ge 2 ] || die "--version requires a value"
+            [ -n "$2" ] || die "--version requires a non-empty value"
             version=$2
             shift 2
             ;;
         --target)
             [ "$#" -ge 2 ] || die "--target requires a value"
+            [ -n "$2" ] || die "--target requires a non-empty value"
             target=$2
             shift 2
             ;;

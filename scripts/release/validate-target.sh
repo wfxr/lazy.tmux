@@ -10,9 +10,19 @@ usage() {
 [ "$#" -eq 1 ] || usage
 
 target=$1
-if ! LC_ALL=C printf '%s\n' "$target" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]*$'; then
-    echo "invalid release target: $target" >&2
-    exit 1
-fi
+script_dir=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+targets=$("$script_dir/release-targets.sh")
 
-printf '%s\n' "$target"
+for supported_target in $targets; do
+    if [ "$target" = "$supported_target" ]; then
+        printf '%s\n' "$target"
+        exit 0
+    fi
+done
+
+echo "unsupported release target: $target" >&2
+echo "supported release targets:" >&2
+for supported_target in $targets; do
+    printf '  %s\n' "$supported_target" >&2
+done
+exit 1

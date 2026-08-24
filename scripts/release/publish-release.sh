@@ -36,7 +36,6 @@ is_expected_asset() {
     return 1
 }
 
-asset_count=0
 for path in "$asset_dir"/* "$asset_dir"/.[!.]* "$asset_dir"/..?*; do
     if [ ! -e "$path" ] && [ ! -L "$path" ]; then
         continue
@@ -44,17 +43,14 @@ for path in "$asset_dir"/* "$asset_dir"/.[!.]* "$asset_dir"/..?*; do
     [ -f "$path" ] && [ ! -L "$path" ] || fail "unexpected non-file asset: $(basename "$path")"
     name=$(basename "$path")
     is_expected_asset "$name" || fail "unexpected local asset: $name"
-    asset_count=$((asset_count + 1))
 done
-
-[ "$asset_count" -eq 5 ] || fail "expected four archives and SHA256SUMS, found $asset_count assets"
 
 expected_checksum_names=
 for target in $targets; do
     name="tmup-v${version}-${target}.tar.gz"
     path="$asset_dir/$name"
     [ -f "$path" ] && [ ! -L "$path" ] || fail "missing local asset: $name"
-    "$script_dir/validate-archive.sh" "$tag" "$target" "$path"
+    "$script_dir/validate-archive.sh" --structure-only "$tag" "$target" "$path"
     expected_checksum_names="${expected_checksum_names}${name}
 "
 done
@@ -63,7 +59,7 @@ checksum_path="$asset_dir/SHA256SUMS"
 [ -f "$checksum_path" ] && [ ! -L "$checksum_path" ] || fail "missing local asset: SHA256SUMS"
 actual_checksum_names=$(awk 'NF { print $2 }' "$checksum_path")
 [ "$actual_checksum_names" = "$(printf '%b' "$expected_checksum_names")" ] ||
-    fail "SHA256SUMS must cover exactly the four release archives in target order"
+    fail "SHA256SUMS must cover every release archive in target order"
 (
     cd "$asset_dir"
     sha256sum --check --strict SHA256SUMS >/dev/null

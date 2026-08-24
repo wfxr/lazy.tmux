@@ -3,7 +3,7 @@
 set -eu
 
 usage() {
-    echo "usage: $0 TAG TARGET ARCHIVE [MANIFEST_PATH]" >&2
+    echo "usage: $0 [--structure-only] TAG TARGET ARCHIVE [MANIFEST_PATH]" >&2
     exit 2
 }
 
@@ -11,6 +11,12 @@ fail() {
     echo "invalid release archive: $*" >&2
     exit 1
 }
+
+run_smoke_test=true
+if [ "${1:-}" = --structure-only ]; then
+    run_smoke_test=false
+    shift
+fi
 
 [ "$#" -ge 3 ] && [ "$#" -le 4 ] || usage
 
@@ -51,6 +57,8 @@ binary="$temp_dir/$package_name/tmup"
 [ -f "$binary" ] || fail "$package_name/tmup is not a regular file"
 [ ! -L "$binary" ] || fail "$package_name/tmup must not be a symbolic link"
 [ -x "$binary" ] || fail "$package_name/tmup is not executable"
+
+[ "$run_smoke_test" = true ] || exit 0
 
 if ! actual_version=$("$binary" --version); then
     fail "$package_name/tmup --version failed"
