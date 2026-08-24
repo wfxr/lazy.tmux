@@ -129,6 +129,11 @@ struct FakeGh {
     root: PathBuf,
     bin_dir: PathBuf,
     state: PathBuf,
+    assets: PathBuf,
+    lock_label: PathBuf,
+    run_status: PathBuf,
+    after_lock: PathBuf,
+    after_archive: PathBuf,
     log: PathBuf,
 }
 
@@ -136,12 +141,19 @@ impl FakeGh {
     fn new(root: &std::path::Path, initial_state: &str) -> Self {
         let bin_dir = root.join("bin");
         let state = root.join("gh-state");
+        let assets = root.join("gh-assets");
+        let lock_label = root.join("gh-lock-label");
+        let run_status = root.join("gh-run-status");
+        let after_lock = root.join("gh-after-lock");
+        let after_archive = root.join("gh-after-archive");
         let log = root.join("gh.log");
         std::fs::create_dir(&bin_dir).unwrap();
         std::fs::write(&state, format!("{initial_state}\n")).unwrap();
         std::fs::write(root.join("gh-prerelease"), "false\n").unwrap();
-        std::fs::write(root.join("gh-lock-label"), "\n").unwrap();
-        std::fs::write(root.join("gh-run-status"), "in_progress\n").unwrap();
+        std::fs::write(&lock_label, "\n").unwrap();
+        std::fs::write(&run_status, "in_progress\n").unwrap();
+        std::fs::write(&after_lock, "none\n").unwrap();
+        std::fs::write(&after_archive, "none\n").unwrap();
 
         let gh = bin_dir.join("gh");
         std::fs::write(
@@ -235,6 +247,14 @@ case "$1:$2" in
                         *'#'*) printf '%s\n' "${argument#*#}" > "$FAKE_GH_LOCK_LABEL" ;;
                         *) echo > "$FAKE_GH_LOCK_LABEL" ;;
                     esac
+                    case "$(cat "$FAKE_GH_AFTER_LOCK")" in
+                        corrupt-lock) echo malformed-owner > "$FAKE_GH_LOCK_LABEL" ;;
+                        publish) echo public > "$FAKE_GH_STATE" ;;
+                    esac
+                else
+                    case "$(cat "$FAKE_GH_AFTER_ARCHIVE")" in
+                        corrupt-lock) echo tmup-publication-run-456-attempt-1 > "$FAKE_GH_LOCK_LABEL" ;;
+                    esac
                 fi
             fi
         done
@@ -266,7 +286,17 @@ esac
         permissions.set_mode(0o755);
         std::fs::set_permissions(&gh, permissions).unwrap();
 
-        Self { root: root.to_path_buf(), bin_dir, state, log }
+        Self {
+            root: root.to_path_buf(),
+            bin_dir,
+            state,
+            assets,
+            lock_label,
+            run_status,
+            after_lock,
+            after_archive,
+            log,
+        }
     }
 
     fn publish_command(
@@ -282,10 +312,12 @@ esac
             .env("PATH", format!("{}:{}", self.bin_dir.display(), std::env::var("PATH").unwrap()))
             .env("FAKE_GH_STATE", &self.state)
             .env("FAKE_GH_PRERELEASE", self.root.join("gh-prerelease"))
-            .env("FAKE_GH_ASSETS", self.root.join("gh-assets"))
+            .env("FAKE_GH_ASSETS", &self.assets)
             .env("FAKE_GH_LOG", &self.log)
-            .env("FAKE_GH_LOCK_LABEL", self.root.join("gh-lock-label"))
-            .env("FAKE_GH_RUN_STATUS", self.root.join("gh-run-status"))
+            .env("FAKE_GH_LOCK_LABEL", &self.lock_label)
+            .env("FAKE_GH_RUN_STATUS", &self.run_status)
+            .env("FAKE_GH_AFTER_LOCK", &self.after_lock)
+            .env("FAKE_GH_AFTER_ARCHIVE", &self.after_archive)
             .env("GITHUB_RUN_ID", "123")
             .env("GITHUB_RUN_ATTEMPT", "1");
         command
@@ -302,6 +334,29 @@ esac
     fn calls(&self) -> String {
         std::fs::read_to_string(&self.log).unwrap()
     }
+
+    fn set_lock(&self, label: &str, digest: &str) {
+        std::fs::write(&self.assets, format!("SHA256SUMS\tuploaded\tsha256:{digest}\n")).unwrap();
+        std::fs::write(&self.lock_label, format!("{label}\n")).unwrap();
+    }
+
+    fn set_run_status(&self, status: &str) {
+        std::fs::write(&self.run_status, format!("{status}\n")).unwrap();
+    }
+
+    fn after_lock(&self, action: &str) {
+        std::fs::write(&self.after_lock, format!("{action}\n")).unwrap();
+    }
+
+    fn after_archive(&self, action: &str) {
+        std::fs::write(&self.after_archive, format!("{action}\n")).unwrap();
+    }
+}
+
+fn sha256(path: &std::path::Path) -> String {
+    let output = std::process::Command::new("sha256sum").arg(path).output().unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().split_whitespace().next().unwrap().to_string()
 }
 
 #[test]
@@ -644,13 +699,10 @@ fn release_publication_refuses_to_race_an_active_tag_run() {
     let temp = tempfile::tempdir().unwrap();
     let release = prepare_release_assets(temp.path());
     let fake_gh = FakeGh::new(temp.path(), "draft");
-    std::fs::write(
-        temp.path().join("gh-assets"),
-        "SHA256SUMS\tuploaded\tsha256:0000000000000000000000000000000000000000000000000000000000000000\n",
-    )
-    .unwrap();
-    std::fs::write(temp.path().join("gh-lock-label"), "tmup-publication-run-999-attempt-1\n")
-        .unwrap();
+    fake_gh.set_lock(
+        "tmup-publication-run-999-attempt-1",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    );
 
     fake_gh
         .publish(&release)
@@ -669,14 +721,11 @@ fn release_publication_takes_over_a_completed_run_lock() {
     let temp = tempfile::tempdir().unwrap();
     let release = prepare_release_assets(temp.path());
     let fake_gh = FakeGh::new(temp.path(), "draft");
-    std::fs::write(
-        temp.path().join("gh-assets"),
-        "SHA256SUMS\tuploaded\tsha256:0000000000000000000000000000000000000000000000000000000000000000\n",
-    )
-    .unwrap();
-    std::fs::write(temp.path().join("gh-lock-label"), "tmup-publication-run-999-attempt-1\n")
-        .unwrap();
-    std::fs::write(temp.path().join("gh-run-status"), "completed\n").unwrap();
+    fake_gh.set_lock(
+        "tmup-publication-run-999-attempt-1",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    );
+    fake_gh.set_run_status("completed");
 
     fake_gh.publish(&release).assert().success();
 
@@ -685,6 +734,117 @@ fn release_publication_takes_over_a_completed_run_lock() {
     assert!(calls.contains("actions/runs/999"));
     assert!(calls.contains("release delete-asset"));
     assert!(calls.contains("release upload"));
+}
+
+#[test]
+fn release_publication_resumes_an_owned_attempt_without_replacing_its_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let release = prepare_release_assets(temp.path());
+    let fake_gh = FakeGh::new(temp.path(), "draft");
+    fake_gh.set_lock("tmup-publication-run-123-attempt-1", &sha256(&release.join("SHA256SUMS")));
+
+    fake_gh.publish(&release).assert().success();
+
+    assert_eq!(fake_gh.state(), "public\n");
+    let calls = fake_gh.calls();
+    assert!(!calls.contains(&format!("release delete-asset {} SHA256SUMS", package_tag())));
+    assert!(!calls.contains("SHA256SUMS#tmup-publication"));
+}
+
+#[test]
+fn release_publication_reacquires_a_lock_from_an_earlier_attempt() {
+    let temp = tempfile::tempdir().unwrap();
+    let release = prepare_release_assets(temp.path());
+    let fake_gh = FakeGh::new(temp.path(), "draft");
+    fake_gh.set_lock(
+        "tmup-publication-run-123-attempt-0",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    );
+
+    fake_gh.publish(&release).assert().success();
+
+    assert_eq!(fake_gh.state(), "public\n");
+    let calls = fake_gh.calls();
+    assert!(calls.contains(&format!("release delete-asset {} SHA256SUMS", package_tag())));
+    assert!(!calls.contains("actions/runs/123"));
+    assert!(calls.contains("SHA256SUMS#tmup-publication-run-123-attempt-1"));
+}
+
+#[test]
+fn release_publication_rejects_a_malformed_draft_owner() {
+    let temp = tempfile::tempdir().unwrap();
+    let release = prepare_release_assets(temp.path());
+    let fake_gh = FakeGh::new(temp.path(), "draft");
+    fake_gh.set_lock(
+        "manually-uploaded",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    );
+
+    fake_gh
+        .publish(&release)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no valid publication owner"));
+
+    assert_eq!(fake_gh.state(), "draft\n");
+    let calls = fake_gh.calls();
+    assert!(!calls.contains("release upload"));
+    assert!(!calls.contains("--draft=false"));
+}
+
+#[test]
+fn release_publication_fails_if_atomic_lock_acquisition_is_lost() {
+    let temp = tempfile::tempdir().unwrap();
+    let release = prepare_release_assets(temp.path());
+    let fake_gh = FakeGh::new(temp.path(), "draft");
+    fake_gh.after_lock("corrupt-lock");
+
+    fake_gh
+        .publish(&release)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("failed to acquire draft publication ownership"));
+
+    assert_eq!(fake_gh.state(), "draft\n");
+    let calls = fake_gh.calls();
+    assert!(!calls.contains("--clobber"));
+    assert!(!calls.contains("--draft=false"));
+}
+
+#[test]
+fn release_publication_stops_if_the_draft_disappears_after_locking() {
+    let temp = tempfile::tempdir().unwrap();
+    let release = prepare_release_assets(temp.path());
+    let fake_gh = FakeGh::new(temp.path(), "draft");
+    fake_gh.after_lock("publish");
+
+    fake_gh.publish(&release).assert().failure().stderr(predicate::str::contains(format!(
+        "release {} is no longer a draft",
+        package_tag()
+    )));
+
+    assert_eq!(fake_gh.state(), "public\n");
+    let calls = fake_gh.calls();
+    assert!(!calls.contains("--clobber"));
+}
+
+#[test]
+fn release_publication_stops_if_ownership_changes_before_publish() {
+    let temp = tempfile::tempdir().unwrap();
+    let release = prepare_release_assets(temp.path());
+    let fake_gh = FakeGh::new(temp.path(), "draft");
+    fake_gh.after_archive("corrupt-lock");
+
+    fake_gh
+        .publish(&release)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("draft publication ownership changed before publish"));
+
+    assert_eq!(fake_gh.state(), "draft\n");
+    let calls = fake_gh.calls();
+    assert!(calls.contains("--clobber"));
+    assert!(!calls.contains("--draft=false"));
 }
 
 #[test]
