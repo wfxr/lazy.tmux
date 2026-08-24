@@ -88,7 +88,9 @@ while [ "$#" -gt 0 ]; do
 done
 printf 'curl %s\n' "$url" >> "$TMUP_TEST_DOWNLOAD_LOG"
 [ -z "$authorization" ] || printf '%s\n' "$authorization" >> "$TMUP_TEST_AUTHORIZATION_LOG"
-cp "$TMUP_TEST_FIXTURES/${url##*/}" "$output"
+fixture=${url##*/}
+fixture=${fixture%%\?*}
+cp "$TMUP_TEST_FIXTURES/$fixture" "$output"
 "#,
         );
     }
@@ -121,7 +123,9 @@ while [ "$#" -gt 0 ]; do
 done
 printf 'wget %s\n' "$url" >> "$TMUP_TEST_DOWNLOAD_LOG"
 [ -z "$authorization" ] || printf '%s\n' "$authorization" >> "$TMUP_TEST_AUTHORIZATION_LOG"
-cp "$TMUP_TEST_FIXTURES/${url##*/}" "$output"
+fixture=${url##*/}
+fixture=${fixture%%\?*}
+cp "$TMUP_TEST_FIXTURES/$fixture" "$output"
 "#,
         );
     }
@@ -231,6 +235,10 @@ printf '1\n'
             format!("{{\n  \"tag_name\": \"v{version}\"\n}}\n"),
         )
         .unwrap();
+    }
+
+    fn write_release_list(&self, releases: &str) {
+        fs::write(self.fixtures_dir.join("releases"), releases).unwrap();
     }
 
     fn package_payload(&self, version: &str, target: &str, payload_member: &str) {
@@ -382,6 +390,139 @@ fn installs_githubs_latest_stable_release_when_version_is_omitted() {
 }
 
 #[test]
+fn installs_the_latest_published_release_when_prereleases_are_included() {
+    let test = InstallerTest::new();
+    test.add_release("2.0.0-rc.1", TARGET, "prerelease tmup\n");
+    test.write_release_list(
+        r#"[
+  {
+    "tag_name": "v2.0.0-rc.1",
+    "draft": false,
+    "prerelease": true
+  },
+  {
+    "tag_name": "v1.2.3",
+    "draft": false,
+    "prerelease": false
+  }
+]
+"#,
+    );
+    let destination = test.root.path().join("destination");
+
+    let output = test.run(&[
+        "--include-prerelease",
+        "--target",
+        TARGET,
+        "--to",
+        destination.to_str().unwrap(),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "installer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(destination.join("tmup")).unwrap(), "prerelease tmup\n");
+    let downloads = fs::read_to_string(&test.download_log).unwrap();
+    assert!(
+        downloads
+            .starts_with("curl https://api.github.com/repos/wfxr/tmup/releases?per_page=100\n")
+    );
+    assert!(downloads.contains("/releases/download/v2.0.0-rc.1/tmup-v2.0.0-rc.1-"));
+}
+
+#[test]
+fn pre_is_an_alias_for_including_prereleases() {
+    let test = InstallerTest::new();
+    test.add_release("2.0.0-rc.1", TARGET, "prerelease tmup\n");
+    test.write_release_list(
+        r#"[
+  {
+    "tag_name": "v2.0.0-rc.1",
+    "draft": false,
+    "prerelease": true
+  }
+]
+"#,
+    );
+    let destination = test.root.path().join("destination");
+
+    let output = test.run(&["--pre", "--target", TARGET, "--to", destination.to_str().unwrap()]);
+
+    assert!(
+        output.status.success(),
+        "installer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(destination.join("tmup")).unwrap(), "prerelease tmup\n");
+}
+
+#[test]
+fn latest_published_release_selection_skips_drafts_visible_to_authenticated_users() {
+    let test = InstallerTest::new();
+    test.add_release("2.0.0-rc.1", TARGET, "published tmup\n");
+    test.write_release_list(
+        r#"[
+  {
+    "tag_name": "v2.1.0-rc.1",
+    "draft": true,
+    "prerelease": true
+  },
+  {
+    "tag_name": "v2.0.0-rc.1",
+    "draft": false,
+    "prerelease": true
+  }
+]
+"#,
+    );
+    let destination = test.root.path().join("destination");
+
+    let output = test
+        .command(&["--pre", "--target", TARGET, "--to", destination.to_str().unwrap()])
+        .env("GITHUB_TOKEN", "test-token")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "installer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(destination.join("tmup")).unwrap(), "published tmup\n");
+    assert_eq!(
+        fs::read_to_string(&test.authorization_log).unwrap(),
+        "Authorization: Bearer test-token\n"
+    );
+}
+
+#[test]
+fn rejects_combining_an_exact_version_with_prerelease_selection() {
+    for prerelease_option in ["--include-prerelease", "--pre"] {
+        let test = InstallerTest::new();
+        let destination = test.root.path().join("destination");
+
+        let output = test.run(&[
+            "--version",
+            "2.0.0-rc.1",
+            prerelease_option,
+            "--target",
+            TARGET,
+            "--to",
+            destination.to_str().unwrap(),
+        ]);
+
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8(output.stderr).unwrap().contains("cannot be combined with --version")
+        );
+        assert!(!test.download_log.exists());
+        assert!(!destination.exists());
+    }
+}
+
+#[test]
 fn installs_to_home_local_bin_by_default_and_warns_when_it_is_not_in_path() {
     let test = InstallerTest::new();
     test.add_latest_release("1.2.3", TARGET, "default install tmup\n");
@@ -486,7 +627,9 @@ fn help_describes_installer_options_and_defaults() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    for option in ["--version", "--target", "--to", "--force", "--help"] {
+    for option in
+        ["--version", "--include-prerelease", "--pre", "--target", "--to", "--force", "--help"]
+    {
         assert!(stdout.contains(option), "help omitted {option}: {stdout}");
     }
     for default in ["latest stable", "native host target", "~/.local/bin"] {

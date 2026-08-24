@@ -5,6 +5,7 @@ umask 077
 
 RELEASES_URL=https://github.com/wfxr/tmup/releases/download
 LATEST_RELEASE_URL=https://api.github.com/repos/wfxr/tmup/releases/latest
+LATEST_PUBLISHED_RELEASE_URL='https://api.github.com/repos/wfxr/tmup/releases?per_page=100'
 # BEGIN GENERATED RELEASE TARGETS
 SUPPORTED_TARGETS='x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin'
 
@@ -29,14 +30,16 @@ usage() {
 Install the latest tmup release or an explicitly selected version.
 
 Usage:
-  install.sh [--version <VERSION>] [--target <TARGET>] [--to <DIRECTORY>] [--force]
+  install.sh [--version <VERSION>] [--include-prerelease] [--target <TARGET>] [--to <DIRECTORY>] [--force]
 
 Options:
-  --version <VERSION>  Stable or prerelease version (default: latest stable)
-  --target <TARGET>    Rust target triple (default: native host target)
-  --to <DIRECTORY>     Install directory (default: ~/.local/bin)
-  --force              Replace an existing tmup binary
-  --help               Show this help
+  --version <VERSION>   Stable or prerelease version (default: latest stable)
+  --include-prerelease, --pre
+                        Select the latest published release, including prereleases
+  --target <TARGET>     Rust target triple (default: native host target)
+  --to <DIRECTORY>      Install directory (default: ~/.local/bin)
+  --force               Replace an existing tmup binary
+  --help                Show this help
 EOF
 }
 
@@ -145,6 +148,10 @@ parse_args() {
             target=$2
             shift 2
             ;;
+        --include-prerelease | --pre)
+            include_prerelease=true
+            shift
+            ;;
         --to)
             [ "$#" -ge 2 ] || die "--to requires a value"
             destination=$2
@@ -170,8 +177,13 @@ main() {
     target=
     destination=
     force=false
+    include_prerelease=false
 
     parse_args "$@"
+
+    if [ "$include_prerelease" = true ] && [ -n "$version" ]; then
+        die "--include-prerelease/--pre cannot be combined with --version"
+    fi
 
     if [ -z "$destination" ]; then
         [ -n "${HOME:-}" ] || die "HOME is required when --to is omitted"
@@ -215,17 +227,39 @@ main() {
         latest_release_path="${tmp_dir}/latest-release.json"
         latest_download_status=0
         latest_authorization=
+        latest_release_url=$LATEST_RELEASE_URL
+        latest_release_description='latest stable release'
+        if [ "$include_prerelease" = true ]; then
+            latest_release_url=$LATEST_PUBLISHED_RELEASE_URL
+            latest_release_description='latest published release'
+        fi
         if [ -n "${GITHUB_TOKEN:-}" ]; then
             latest_authorization="Authorization: Bearer ${GITHUB_TOKEN}"
         fi
         # ShellCheck 0.11's data-flow analysis does not see the earlier definition here.
         # shellcheck disable=SC2218
-        download "$LATEST_RELEASE_URL" "$latest_release_path" "$latest_authorization" || latest_download_status=$?
+        download "$latest_release_url" "$latest_release_path" "$latest_authorization" || latest_download_status=$?
         if [ "$latest_download_status" -ne 0 ]; then
-            printf 'tmup installer: failed to resolve the latest stable release\n' >&2
+            printf 'tmup installer: failed to resolve the %s\n' "$latest_release_description" >&2
             exit 1
         fi
-        version=$(awk '
+        if [ "$include_prerelease" = true ]; then
+            version=$(awk '
+match($0, /"tag_name"[[:space:]]*:[[:space:]]*"/) {
+    candidate = substr($0, RSTART + RLENGTH)
+    sub(/".*/, "", candidate)
+}
+match($0, /"draft"[[:space:]]*:[[:space:]]*(true|false)/) {
+    draft_field = substr($0, RSTART, RLENGTH)
+    if (candidate != "" && draft_field ~ /false$/) {
+        print candidate
+        exit
+    }
+    candidate = ""
+}
+' "$latest_release_path")
+        else
+            version=$(awk '
 match($0, /"tag_name"[[:space:]]*:[[:space:]]*"/) {
     value = substr($0, RSTART + RLENGTH)
     sub(/".*/, "", value)
@@ -233,11 +267,14 @@ match($0, /"tag_name"[[:space:]]*:[[:space:]]*"/) {
     exit
 }
 ' "$latest_release_path")
+        fi
         [ -n "$version" ] || die "latest release response has no tag_name"
         validate_version
-        case "$version" in
-        *-*) die "latest release is not stable: v${version}" ;;
-        esac
+        if [ "$include_prerelease" = false ]; then
+            case "$version" in
+            *-*) die "latest release is not stable: v${version}" ;;
+            esac
+        fi
     fi
 
     archive_dir="tmup-v${version}-${target}"

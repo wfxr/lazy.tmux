@@ -90,14 +90,22 @@ the pipe command, pass options after `sh -s --`.
 | Option | Behavior |
 |--------|----------|
 | `--version <VERSION>` | Install an explicit stable or prerelease version, with or without a leading `v`; omit it to select the latest stable release |
+| `--include-prerelease`, `--pre` | Install the latest published release, whether stable or prerelease; can't be combined with `--version` |
 | `--to <DIRECTORY>` | Install to a specific directory instead of `~/.local/bin` |
 | `--force` | Replace an existing `tmup` binary; without this option, the installer refuses to overwrite it |
 | `--target <TARGET>` | Override host detection with one of the supported target triples |
 | `--help` | Print usage information and exit without installing |
 
-GitHub's latest-release selection excludes prereleases. To install a
-prerelease, request its exact version with `--version`, for example,
-`--version 0.2.0-rc.1`.
+GitHub's latest-release selection excludes prereleases. To install the latest
+published release whether it is stable or prerelease, use `--pre`:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/wfxr/tmup/main/install.sh |
+  sh -s -- --pre
+```
+
+For a reproducible install, request an exact version with `--version`, for
+example, `--version 0.1.0-rc.3`.
 
 #### Supported targets
 
