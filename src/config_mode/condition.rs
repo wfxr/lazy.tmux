@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 
 use crate::config::{Condition, PluginDeclaration};
+use crate::config_mode::ResolutionIntent;
 use crate::model::PluginSpec;
 
 const CONDITION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -107,50 +108,88 @@ fn outcome_from_status(status: std::process::ExitStatus) -> ProcessOutcome {
     }
 }
 
-pub(super) fn project_enabled_plugins(
-    declarations: Vec<PluginDeclaration>,
-    working_dir: &Path,
-) -> Result<Vec<PluginSpec>> {
-    project_enabled_plugins_with_runner(declarations, working_dir, &ShellConditionRunner)
+#[derive(Debug)]
+pub(super) struct ResolvedPlugins {
+    pub(super) plugins: Vec<PluginSpec>,
+    pub(super) load_eligibility: Option<Vec<bool>>,
 }
 
-fn project_enabled_plugins_with_runner(
+pub(super) fn resolve_plugins(
     declarations: Vec<PluginDeclaration>,
     working_dir: &Path,
+    intent: ResolutionIntent,
+) -> Result<ResolvedPlugins> {
+    resolve_plugins_with_runner(declarations, working_dir, intent, &ShellConditionRunner)
+}
+
+fn resolve_plugins_with_runner(
+    declarations: Vec<PluginDeclaration>,
+    working_dir: &Path,
+    intent: ResolutionIntent,
     process: &impl ConditionProcess,
-) -> Result<Vec<PluginSpec>> {
-    let mut plugins = Vec::with_capacity(declarations.len());
-    for declaration in declarations {
-        if evaluate_enable_condition(&declaration, working_dir, process)? {
-            plugins.push(declaration.spec);
-        }
+) -> Result<ResolvedPlugins> {
+    let mut enabled = Vec::with_capacity(declarations.len());
+    for declaration in &declarations {
+        enabled.push(evaluate_condition(
+            &declaration.enabled,
+            declaration,
+            "enabled",
+            working_dir,
+            process,
+        )?);
     }
-    Ok(plugins)
+
+    let enabled_declarations: Vec<_> = declarations
+        .into_iter()
+        .zip(enabled)
+        .filter_map(|(declaration, enabled)| enabled.then_some(declaration))
+        .collect();
+
+    let load_eligibility = if matches!(intent, ResolutionIntent::LoadEligibility) {
+        let mut eligibility = Vec::with_capacity(enabled_declarations.len());
+        for declaration in &enabled_declarations {
+            eligibility.push(evaluate_condition(
+                &declaration.load_condition,
+                declaration,
+                "cond",
+                working_dir,
+                process,
+            )?);
+        }
+        Some(eligibility)
+    } else {
+        None
+    };
+    let plugins = enabled_declarations.into_iter().map(|declaration| declaration.spec).collect();
+
+    Ok(ResolvedPlugins { plugins, load_eligibility })
 }
 
-fn evaluate_enable_condition(
+fn evaluate_condition(
+    condition: &Condition,
     declaration: &PluginDeclaration,
+    key: &str,
     working_dir: &Path,
     process: &impl ConditionProcess,
 ) -> Result<bool> {
-    let Condition::Shell(predicate) = &declaration.enabled else {
-        return Ok(matches!(declaration.enabled, Condition::Bool(true)));
+    let Condition::Shell(predicate) = condition else {
+        return Ok(matches!(condition, Condition::Bool(true)));
     };
     let plugin = declaration.spec.remote_id().unwrap_or(&declaration.spec.name);
     match process.run(predicate, working_dir, CONDITION_TIMEOUT) {
         Ok(ProcessOutcome::Exited(0)) => Ok(true),
         Ok(ProcessOutcome::Exited(_)) => Ok(false),
         Ok(ProcessOutcome::Signaled) => {
-            bail!("plugin \"{plugin}\": enabled shell predicate terminated by a signal")
+            bail!("plugin \"{plugin}\": {key} shell predicate terminated by a signal")
         }
         Ok(ProcessOutcome::TimedOut) => {
-            bail!("plugin \"{plugin}\": enabled shell predicate timed out after 5 seconds")
+            bail!("plugin \"{plugin}\": {key} shell predicate timed out after 5 seconds")
         }
         Err(ProcessFailure::Spawn(error)) => {
-            bail!("plugin \"{plugin}\": failed to start /bin/sh for enabled predicate: {error}")
+            bail!("plugin \"{plugin}\": failed to start /bin/sh for {key} predicate: {error}")
         }
         Err(ProcessFailure::Monitor(error)) => {
-            bail!("plugin \"{plugin}\": failed while running enabled predicate: {error}")
+            bail!("plugin \"{plugin}\": failed while running {key} predicate: {error}")
         }
     }
 }
@@ -203,9 +242,14 @@ plugin "user/third" enabled="third"
         let process =
             FakeProcess::new([Ok(ProcessOutcome::Exited(0)), Ok(ProcessOutcome::Exited(9))]);
 
-        let plugins =
-            project_enabled_plugins_with_runner(parsed.plugins, Path::new("/config"), &process)
-                .unwrap();
+        let plugins = resolve_plugins_with_runner(
+            parsed.plugins,
+            Path::new("/config"),
+            ResolutionIntent::ManagedState,
+            &process,
+        )
+        .unwrap()
+        .plugins;
 
         let names: Vec<_> = plugins.iter().map(|plugin| plugin.name.as_str()).collect();
         assert_eq!(names, ["first", "second"]);
@@ -227,9 +271,75 @@ plugin "user/third" enabled="third"
                     .unwrap();
             let process = FakeProcess::new([outcome]);
 
-            let error =
-                project_enabled_plugins_with_runner(parsed.plugins, Path::new("/config"), &process)
-                    .unwrap_err();
+            let error = resolve_plugins_with_runner(
+                parsed.plugins,
+                Path::new("/config"),
+                ResolutionIntent::ManagedState,
+                &process,
+            )
+            .unwrap_err();
+
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn resolves_enable_phase_before_load_phase_and_short_circuits_disabled_plugins() {
+        let parsed = crate::config::parse_config_document(
+            r#"
+plugin "user/first" enabled="enable-first" cond="load-first"
+plugin "user/disabled" enabled="enable-disabled" cond="must-not-run"
+plugin "user/third" enabled="enable-third" cond="load-third"
+"#,
+        )
+        .unwrap();
+        let process = FakeProcess::new([
+            Ok(ProcessOutcome::Exited(0)),
+            Ok(ProcessOutcome::Exited(1)),
+            Ok(ProcessOutcome::Exited(0)),
+            Ok(ProcessOutcome::Exited(0)),
+            Ok(ProcessOutcome::Exited(9)),
+        ]);
+
+        let resolved = resolve_plugins_with_runner(
+            parsed.plugins,
+            Path::new("/config"),
+            ResolutionIntent::LoadEligibility,
+            &process,
+        )
+        .unwrap();
+
+        let names: Vec<_> = resolved.plugins.iter().map(|plugin| plugin.name.as_str()).collect();
+        assert_eq!(names, ["first", "third"]);
+        assert_eq!(resolved.load_eligibility.as_deref(), Some(&[true, false][..]));
+        assert_eq!(
+            process.calls.into_inner(),
+            ["enable-first", "enable-disabled", "enable-third", "load-first", "load-third"]
+        );
+    }
+
+    #[test]
+    fn load_condition_process_failures_are_hard_errors() {
+        let cases = [
+            (Ok(ProcessOutcome::Signaled), "cond shell predicate terminated by a signal"),
+            (Ok(ProcessOutcome::TimedOut), "cond shell predicate timed out after 5 seconds"),
+            (Err(ProcessFailure::Spawn("missing shell".into())), "for cond predicate"),
+            (Err(ProcessFailure::Monitor("wait failed".into())), "running cond predicate"),
+        ];
+
+        for (outcome, expected) in cases {
+            let parsed =
+                crate::config::parse_config_document(r#"plugin "user/repo" cond="predicate""#)
+                    .unwrap();
+            let process = FakeProcess::new([outcome]);
+
+            let error = resolve_plugins_with_runner(
+                parsed.plugins,
+                Path::new("/config"),
+                ResolutionIntent::LoadEligibility,
+                &process,
+            )
+            .unwrap_err();
 
             assert!(error.to_string().contains(expected), "{error:#}");
         }

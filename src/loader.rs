@@ -1,10 +1,14 @@
 use std::path::Path;
 
-use crate::model::{Config, PluginSource};
+use crate::config_mode::LoadEligibility;
+use crate::model::PluginSource;
 use crate::tmux::TmuxCommand;
 
 /// Build the full load plan: set env, then for each plugin set opts + run *.tmux files.
-pub fn build_load_plan(config: &Config, plugin_root: &Path) -> Vec<TmuxCommand> {
+pub fn build_load_plan(
+    load_eligibility: LoadEligibility<'_>,
+    plugin_root: &Path,
+) -> Vec<TmuxCommand> {
     let mut plan = Vec::new();
 
     // 1. Set TMUX_PLUGIN_MANAGER_PATH with trailing slash
@@ -15,7 +19,10 @@ pub fn build_load_plan(config: &Config, plugin_root: &Path) -> Vec<TmuxCommand> 
     });
 
     // 2. For each plugin in declaration order: apply opts, then run *.tmux
-    for spec in &config.plugins {
+    for (spec, load_eligible) in load_eligibility.plugins() {
+        if !load_eligible {
+            continue;
+        }
         // Apply opt settings
         for (key, value) in &spec.opts {
             plan.push(TmuxCommand::SetOption {

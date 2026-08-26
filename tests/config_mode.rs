@@ -2,8 +2,8 @@ mod utils;
 
 use tempfile::tempdir;
 use tmup::config_mode::{
-    ConfigMode, LoadRequest, TmupConfigPolicy, TpmConfigPolicy, load_from_sources,
-    load_with_request,
+    ConfigMode, LoadRequest, ResolutionIntent, TmupConfigPolicy, TpmConfigPolicy,
+    load_from_sources, load_from_sources_with_intent, load_with_request,
 };
 use tmup::model::{PluginSource, Tracking};
 use tmup::state::Paths;
@@ -189,6 +189,7 @@ fn config_mode_load_request_uses_resolved_tpm_path() {
             mode: ConfigMode::Mixed,
             tmup_policy: TmupConfigPolicy::ReadOnly,
             tpm_policy: TpmConfigPolicy::Resolved(Some(tpm.clone())),
+            intent: ResolutionIntent::ManagedState,
         },
     )
     .unwrap();
@@ -225,6 +226,42 @@ plugin "{}" local=#true enabled=#false
 
     let visible: Vec<_> = loaded.config.plugins.iter().map(|plugin| plugin.name.as_str()).collect();
     assert_eq!(visible, ["default", "enabled", "local-enabled"]);
+}
+
+#[test]
+fn load_conditions_resolve_for_enabled_remote_and_local_plugins() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("config");
+    let kdl = config_dir.join("tmup.kdl");
+    let local = dir.path().join("local-plugin");
+    write_file(&config_dir.join("load-marker"), "ready\n");
+    write_file(
+        &kdl,
+        &format!(
+            r#"
+plugin "user/default"
+plugin "user/false" cond=#false
+plugin "user/shell-true" cond="test -f load-marker"
+plugin "user/shell-false" cond="exit 37"
+plugin "{}" local=#true cond=#false
+"#,
+            local.display(),
+        ),
+    );
+
+    let loaded = load_from_sources_with_intent(
+        ConfigMode::Pure,
+        Some(&kdl),
+        None,
+        ResolutionIntent::LoadEligibility,
+    )
+    .unwrap();
+
+    assert_eq!(loaded.config.plugins.len(), 5);
+    assert_eq!(
+        loaded.config.load_eligibility().map(|eligibility| eligibility.values()),
+        Some(&[true, false, true, false, false][..])
+    );
 }
 
 #[test]
@@ -271,6 +308,37 @@ fn mixed_mode_merges_before_evaluating_enable_conditions() {
 }
 
 #[test]
+fn mixed_mode_preserves_tpm_order_and_applies_kdl_load_conditions_after_merge() {
+    let dir = tempdir().unwrap();
+    let kdl = dir.path().join("tmup.kdl");
+    let tpm = dir.path().join("tmux.conf");
+    write_file(&kdl, r#"plugin "tmux-plugins/tmux-sensible" cond=#false"#);
+    write_file(
+        &tpm,
+        concat!(
+            "set -g @plugin 'tmux-plugins/tmux-sensible'\n",
+            "set -g @plugin 'tmux-plugins/tmux-yank'\n",
+        ),
+    );
+
+    let loaded = load_from_sources_with_intent(
+        ConfigMode::Mixed,
+        Some(&kdl),
+        Some(&tpm),
+        ResolutionIntent::LoadEligibility,
+    )
+    .unwrap();
+
+    let ids: Vec<_> =
+        loaded.config.plugins.iter().filter_map(|plugin| plugin.remote_id()).collect();
+    assert_eq!(ids, ["github.com/tmux-plugins/tmux-sensible", "github.com/tmux-plugins/tmux-yank"]);
+    assert_eq!(
+        loaded.config.load_eligibility().map(|eligibility| eligibility.values()),
+        Some(&[false, true][..])
+    );
+}
+
+#[test]
 fn unknown_plugin_parameters_warn_without_hiding_recognized_configuration() {
     let dir = tempdir().unwrap();
     let kdl = dir.path().join("tmup.kdl");
@@ -312,11 +380,48 @@ fn invalid_enable_condition_forms_are_rejected() {
 }
 
 #[test]
+fn invalid_load_condition_forms_are_rejected_before_predicates_run() {
+    let dir = tempdir().unwrap();
+    let kdl = dir.path().join("tmup.kdl");
+    let marker = dir.path().join("predicate-ran");
+    let cases = [
+        (r#"plugin "user/repo" cond=42"#, "bool or shell predicate string"),
+        (r#"plugin "user/repo" cond="""#, "must not be empty"),
+        (r#"plugin "user/repo" cond="   ""#, "whitespace-only"),
+        (r#"plugin "user/repo" cond=(future)#true"#, "type annotations"),
+        ("plugin \"user/repo\" { cond { future #true } }", "cond child form is reserved"),
+    ];
+
+    for (input, expected) in cases {
+        write_file(
+            &kdl,
+            &format!("plugin \"user/first\" enabled=\"touch {}\"\n{input}", marker.display()),
+        );
+        let error = load_from_sources(ConfigMode::Pure, Some(&kdl), None).unwrap_err();
+        assert!(error.to_string().contains(expected), "input={input:?}, error={error:#}");
+        assert!(!marker.exists(), "structural errors must precede predicate execution");
+    }
+}
+
+#[test]
+fn managed_state_resolution_does_not_evaluate_load_conditions() {
+    let dir = tempdir().unwrap();
+    let kdl = dir.path().join("tmup.kdl");
+    write_file(&kdl, r#"plugin "user/repo" cond="kill -TERM $$""#);
+
+    let loaded = load_from_sources(ConfigMode::Pure, Some(&kdl), None).unwrap();
+
+    assert_eq!(loaded.config.plugins.len(), 1);
+    assert!(loaded.config.load_eligibility().is_none());
+}
+
+#[test]
 fn repeated_known_plugin_values_are_rejected() {
     let dir = tempdir().unwrap();
     let kdl = dir.path().join("tmup.kdl");
     let cases = [
         r#"plugin "user/repo" enabled=#true enabled=#false"#,
+        r#"plugin "user/repo" cond=#true cond=#false"#,
         r#"plugin "user/repo" name="one" name="two""#,
         r#"plugin "user/repo" { build "one"; build "two"; }"#,
     ];

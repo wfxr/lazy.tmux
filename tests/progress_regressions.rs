@@ -1592,20 +1592,34 @@ fn init_bootstrap_keeps_probing_long_enough_for_late_target() {
 }
 
 #[test]
-fn init_loads_tmux_after_sync_plugin_failures() {
+fn false_load_condition_still_builds_and_reports_failure_before_loading_eligible_neighbor() {
     let dir = tempdir().unwrap();
     let _bare = make_remote_repo(dir.path());
     let gitconfig = write_git_rewrite_config(dir.path());
+    let build_witness = dir.path().join("failing-build-ran");
+    let neighbor_dir = dir.path().join("neighbor-plugin");
+    std::fs::create_dir_all(&neighbor_dir).unwrap();
+    let neighbor_script = neighbor_dir.join("neighbor.tmux");
+    std::fs::write(&neighbor_script, "#!/bin/sh\n").unwrap();
 
     let config_dir = dir.path().join("config");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
     std::fs::write(
         &config_path,
-        r#"
-options { auto-install #true }
-plugin "https://example.com/test/plugin.git" build="exit 1"
+        format!(
+            r#"
+options {{ auto-install #true }}
+plugin "https://example.com/test/plugin.git" cond=#false build=": > '{}'; exit 1" {{
+    opt "must-not-load" "yes"
+}}
+plugin "{}" local=#true {{
+    opt "neighbor-loaded" "yes"
+}}
         "#,
+            build_witness.display(),
+            neighbor_dir.display(),
+        ),
     )
     .unwrap();
 
@@ -1635,8 +1649,9 @@ plugin "https://example.com/test/plugin.git" build="exit 1"
 
     assert!(
         !output.status.success(),
-        "ui child should still return non-zero after plugin-level sync failures"
+        "a cond=false plugin build failure must still return a non-zero status"
     );
+    assert!(build_witness.exists(), "cond=false must not suppress the plugin build command");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Fetching"), "stderr:\n{stderr}");
@@ -1650,16 +1665,25 @@ plugin "https://example.com/test/plugin.git" build="exit 1"
         serde_json::from_slice(&std::fs::read(&result_path).unwrap()).unwrap();
     assert_eq!(result["version"], 1);
     assert_eq!(result["result"]["status"], "completed_with_plugin_failures");
-    assert_eq!(result["result"]["failures"].as_array().unwrap().len(), 1);
+    let failures = result["result"]["failures"].as_array().unwrap();
+    assert_eq!(failures.len(), 1);
+    assert!(
+        failures[0].as_str().unwrap().contains("example.com/test/plugin"),
+        "plugin failure must retain its canonical identity: {failures:?}"
+    );
+
+    let markers = tmup::state::read_failure_markers(&state_root.join("failures")).unwrap();
+    assert_eq!(markers.len(), 1, "failed build must persist one retry-suppression marker");
+    assert_eq!(markers[0].plugin_id, "example.com/test/plugin");
+    assert!(markers[0].build_command.contains("failing-build-ran"));
 
     let log = std::fs::read_to_string(&tmux_log).unwrap_or_default();
-    let has_plugin_manager_env = log
-        .lines()
-        .any(|line| line.contains("set-environment") && line.contains("TMUX_PLUGIN_MANAGER_PATH"));
-    let has_run_shell = log.lines().any(|line| line.split_whitespace().next() == Some("run-shell"));
     assert!(
-        has_plugin_manager_env || has_run_shell,
-        "expected loader activity (`set-environment ... TMUX_PLUGIN_MANAGER_PATH` or `run-shell`) \
-after sync plugin failure, got log:\n{log}"
+        log.lines().any(|line| {
+            line.starts_with("run-shell ") && line.contains(&neighbor_script.to_string_lossy()[..])
+        }),
+        "eligible neighbor script must load after the cond=false build failure:\n{log}"
     );
+    assert!(log.lines().any(|line| line == "set -g @neighbor-loaded yes"), "{log}");
+    assert!(!log.contains("@must-not-load"), "cond=false options must stay unloaded:\n{log}");
 }
