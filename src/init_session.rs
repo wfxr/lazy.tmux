@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -75,12 +77,18 @@ impl PublicInvocation {
     }
 }
 
+struct ChildHandoff<'session> {
+    context: InvocationContext,
+    source: record::UiChildSource,
+    session: Option<&'session record::SessionOwner>,
+}
+
 trait TmuxAdapter {
     fn ui_available(&mut self) -> bool;
     fn current_host_available(&mut self) -> bool;
     fn wait_for_host(&mut self) -> bool;
     fn defer(&mut self, resume_path: &Path) -> Result<()>;
-    fn host_child(&mut self, continuation: Continuation) -> Result<()>;
+    fn host_child(&mut self, handoff: ChildHandoff<'_>) -> Result<()>;
     fn display_fallback(&mut self, message: &str);
     fn display_waiting(&mut self);
     fn execute_load_plan(&mut self, plan: &[TmuxCommand]) -> Result<()>;
@@ -88,6 +96,14 @@ trait TmuxAdapter {
 
 async fn resume_with_adapter(
     continuation: Continuation,
+    tmux: &mut impl TmuxAdapter,
+) -> Result<Outcome> {
+    resume_with_adapter_in_session(continuation, None, tmux).await
+}
+
+async fn resume_with_adapter_in_session(
+    continuation: Continuation,
+    session: Option<&record::SessionOwner>,
     tmux: &mut impl TmuxAdapter,
 ) -> Result<Outcome> {
     match continuation {
@@ -106,7 +122,11 @@ async fn resume_with_adapter(
                 return execute_inline(&context, &loaded.warnings, LockWaitMessage::Silent, tmux)
                     .await;
             }
-            tmux.host_child(Continuation::HostedChild(context))?;
+            tmux.host_child(ChildHandoff {
+                context,
+                source: record::UiChildSource::DeferredBootstrap,
+                session,
+            })?;
             Ok(Outcome::Completed)
         }
         Continuation::HostedChild(context) => execute_hosted(&context, tmux).await,
@@ -119,32 +139,56 @@ pub(crate) async fn run(invocation: PublicInvocation) -> Result<Outcome> {
     run_loaded_with_adapter(context, loaded, &mut tmux).await
 }
 
-pub(crate) async fn resume(continuation: Continuation) -> Result<Outcome> {
-    let mut tmux = ProductionTmux::new();
-    resume_with_adapter(continuation, &mut tmux).await
-}
-
-async fn resume_bootstrap_record(path: &Path) -> Result<Outcome> {
-    let claimed = record::claim_bootstrap(path)?;
-    let (context, owner) = claimed.into_parts();
-    match resume(Continuation::DeferredBootstrap(context)).await {
-        Ok(outcome) => {
-            owner.cleanup()?;
-            Ok(outcome)
+async fn resume_record_with_adapter(path: &Path, tmux: &mut impl TmuxAdapter) -> Result<Outcome> {
+    match record::claim(path)? {
+        record::ClaimedContinuation::Bootstrap(claimed) => {
+            let (context, owner) = claimed.into_parts();
+            match resume_with_adapter_in_session(
+                Continuation::DeferredBootstrap(context),
+                Some(&owner),
+                tmux,
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    owner.cleanup()?;
+                    Ok(outcome)
+                }
+                Err(error) => {
+                    let _ = owner.cleanup();
+                    Err(error)
+                }
+            }
         }
-        Err(error) => {
-            let _ = owner.cleanup();
-            Err(error)
+        record::ClaimedContinuation::UiChild(claimed) => {
+            let execution =
+                resume_with_adapter(Continuation::HostedChild(claimed.context().clone()), tmux)
+                    .await;
+            let child_result = match &execution {
+                Ok(Outcome::Completed) => record::ChildResult::Completed,
+                Ok(Outcome::CompletedWithPluginFailures(failures)) => {
+                    record::ChildResult::CompletedWithPluginFailures { failures: failures.clone() }
+                }
+                Ok(Outcome::Deferred) => unreachable!("hosted child cannot defer"),
+                Err(_) => record::ChildResult::OperationFailed,
+            };
+            claimed.publish_result(&child_result)?;
+            match execution {
+                Ok(Outcome::CompletedWithPluginFailures(_)) => Err(progress::reported_error()),
+                other => other,
+            }
         }
     }
 }
 
-fn finish(outcome: Outcome, failures_already_reported: bool) -> Result<()> {
+async fn resume_record(path: &Path) -> Result<Outcome> {
+    let mut tmux = ProductionTmux::new();
+    resume_record_with_adapter(path, &mut tmux).await
+}
+
+fn finish(outcome: Outcome) -> Result<()> {
     match outcome {
         Outcome::Completed | Outcome::Deferred => Ok(()),
-        Outcome::CompletedWithPluginFailures(_) if failures_already_reported => {
-            Err(progress::reported_error())
-        }
         Outcome::CompletedWithPluginFailures(failures) => {
             anyhow::bail!(
                 "init encountered {} failure(s):\n  {}",
@@ -211,7 +255,11 @@ async fn run_loaded_with_adapter(
         return execute_inline(&context, &loaded.warnings, LockWaitMessage::Silent, tmux).await;
     }
     if tmux.current_host_available() {
-        tmux.host_child(Continuation::HostedChild(context))?;
+        tmux.host_child(ChildHandoff {
+            context,
+            source: record::UiChildSource::Direct,
+            session: None,
+        })?;
         return Ok(Outcome::Completed);
     }
     let published = record::publish_bootstrap(&context)?;
@@ -334,83 +382,137 @@ fn emit_warnings(preview_warnings: &[String], execution_warnings: &[String]) {
 
 #[derive(Debug, Args)]
 pub(crate) struct ProductionInitArgs {
-    #[arg(
-        hide = true,
-        long,
-        value_name = "PATH",
-        conflicts_with_all = [
-            "ui_child",
-            "wait_channel",
-            "config_path",
-            "tpm_config_path",
-            "no_tpm_config",
-            "data_root",
-            "state_root"
-        ]
-    )]
+    #[arg(hide = true, long, value_name = "PATH")]
     resume: Option<PathBuf>,
-    #[arg(hide = true, long)]
-    ui_child: bool,
-    #[arg(hide = true, long)]
-    wait_channel: Option<String>,
-    #[arg(hide = true, long)]
-    config_path: Option<PathBuf>,
-    #[arg(hide = true, long)]
-    tpm_config_path: Option<PathBuf>,
-    #[arg(hide = true, long, conflicts_with = "tpm_config_path")]
-    no_tpm_config: bool,
-    #[arg(hide = true, long)]
-    data_root: Option<PathBuf>,
-    #[arg(hide = true, long)]
-    state_root: Option<PathBuf>,
 }
 
 impl ProductionInitArgs {
     pub(crate) async fn execute(self) -> Result<()> {
         if let Some(resume_path) = self.resume.as_deref() {
-            return finish(resume_bootstrap_record(resume_path).await?, false);
+            return finish(resume_record(resume_path).await?);
         }
         let config_mode = super::resolve_requested_config_mode()?;
-        match self.into_continuation(config_mode)? {
-            Some(continuation) => {
-                let is_hosted_child = matches!(continuation, Continuation::HostedChild(_));
-                finish(resume(continuation).await?, is_hosted_child)
-            }
-            None => finish(run(PublicInvocation::new(config_mode)).await?, false),
-        }
-    }
-
-    fn into_continuation(self, config_mode: ConfigMode) -> Result<Option<Continuation>> {
-        if self.ui_child {
-            self.wait_channel.as_ref().context("--ui-child requires --wait-channel")?;
-            return Ok(Some(Continuation::HostedChild(self.context(config_mode, "--ui-child")?)));
-        }
-        Ok(None)
-    }
-
-    fn context(&self, config_mode: ConfigMode, role: &str) -> Result<InvocationContext> {
-        let tpm_identity = match config_mode {
-            ConfigMode::Pure => ResolvedTpmIdentity::Disabled,
-            ConfigMode::Mixed if self.no_tpm_config => ResolvedTpmIdentity::Absent,
-            ConfigMode::Mixed => self
-                .tpm_config_path
-                .clone()
-                .map(ResolvedTpmIdentity::Path)
-                .with_context(|| format!("{role} requires a resolved TPM config identity"))?,
-        };
-        Ok(InvocationContext::new(
-            config_mode,
-            self.config_path.clone().with_context(|| format!("{role} requires --config-path"))?,
-            tpm_identity,
-            self.data_root.clone().with_context(|| format!("{role} requires --data-root"))?,
-            self.state_root.clone().with_context(|| format!("{role} requires --state-root"))?,
-        ))
+        finish(run(PublicInvocation::new(config_mode)).await?)
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TmuxVersion {
+    major: u16,
+    minor: u16,
+    suffix: Option<char>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitUiMode {
+    Popup { supports_title: bool },
+    Split,
+    Inline,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InitUiTarget {
+    client: String,
+    pane: String,
+}
+
+struct InitResumeSpec {
+    exe: PathBuf,
+    resume_path: PathBuf,
+}
+
+impl InitResumeSpec {
+    fn build_shell_command(&self) -> String {
+        shell_join([
+            self.exe.to_string_lossy().into_owned(),
+            "init".into(),
+            "--resume".into(),
+            self.resume_path.to_string_lossy().into_owned(),
+        ])
+    }
+
+    fn build_shell_wrapper(&self, wait_channel: Option<&str>, keep_failed_pane: bool) -> String {
+        let remain_on_exit = if keep_failed_pane {
+            "tmux set-option -p remain-on-exit failed >/dev/null 2>&1 || true\n"
+        } else {
+            ""
+        };
+        let (channel, cleanup, trap) = match wait_channel {
+            Some(channel) => (
+                format!("channel={}\n", shell_quote(channel)),
+                "cleanup() { tmux wait-for -S \"$channel\"; }\n",
+                "trap 'restore_tty; cleanup' EXIT INT TERM HUP",
+            ),
+            None => (String::new(), "", "trap 'restore_tty' EXIT INT TERM HUP"),
+        };
+        let command = self.build_shell_command();
+        format!(
+            r#"{channel}tty_state=
+{cleanup}
+restore_tty() {{ [ -n "$tty_state" ] && stty "$tty_state" >/dev/null 2>&1 || true; }}
+{trap}
+{remain_on_exit}{command}
+if [ -t 0 ]; then
+  tty_state=$(stty -g 2>/dev/null || true)
+  stty -icanon -echo min 1 time 0 >/dev/null 2>&1 || true
+  while :; do
+    key=$(dd bs=1 count=1 2>/dev/null)
+    [ "$key" = 'q' ] && break
+  done
+fi
+exit 0"#,
+        )
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    let mut quoted = String::from("'");
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\"'\"'");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn shell_join(args: impl IntoIterator<Item = String>) -> String {
+    args.into_iter().map(|arg| shell_quote(&arg)).collect::<Vec<_>>().join(" ")
+}
+
+fn parse_tmux_version(raw: &str) -> Option<TmuxVersion> {
+    let raw = raw.trim();
+    let start = raw.find(|ch: char| ch.is_ascii_digit())?;
+    let version = &raw[start..];
+    let dot = version.find('.')?;
+    let major = version[..dot].parse().ok()?;
+    let rest = &version[dot + 1..];
+    let end = rest.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    let minor = rest[..end].parse().ok()?;
+    let suffix = rest[end..].chars().next().filter(|ch| ch.is_ascii_alphabetic());
+    Some(TmuxVersion { major, minor, suffix })
+}
+
+fn tmux_supports_popup_title(version: TmuxVersion) -> bool {
+    (version.major, version.minor) >= (3, 3)
+}
+
+fn tmux_supports_popup(version: TmuxVersion) -> bool {
+    (version.major, version.minor) >= (3, 2)
+}
+
+fn tmux_supports_split_ui(version: TmuxVersion) -> bool {
+    (version.major, version.minor) >= (2, 0)
+}
+
 struct ProductionTmux {
-    ui_mode: Option<tmup::tmux::InitUiMode>,
-    target: Option<tmup::tmux::InitUiTarget>,
+    ui_mode: Option<InitUiMode>,
+    target: Option<InitUiTarget>,
 }
 
 impl ProductionTmux {
@@ -422,83 +524,224 @@ impl ProductionTmux {
         std::env::current_exe().context("failed to determine current executable")
     }
 
-    fn bootstrap_spec(resume_path: &Path) -> Result<tmup::tmux::InitBootstrapSpec> {
-        Ok(tmup::tmux::InitBootstrapSpec {
-            exe: Self::executable()?,
-            resume_path: resume_path.to_path_buf(),
-        })
+    fn resume_spec(resume_path: &Path) -> Result<InitResumeSpec> {
+        Ok(InitResumeSpec { exe: Self::executable()?, resume_path: resume_path.to_path_buf() })
     }
 
-    fn child_spec(
-        context: InvocationContext,
-        wait_channel: String,
-    ) -> Result<tmup::tmux::InitUiChildSpec> {
-        Ok(tmup::tmux::InitUiChildSpec {
-            exe: Self::executable()?,
-            config_path: context.config_path,
-            tpm_config_policy: context.tpm_identity.policy(),
-            data_root: context.data_root,
-            state_root: context.state_root,
-            wait_channel,
-            config_mode: context.config_mode,
-        })
+    fn read_tmux_version() -> Option<TmuxVersion> {
+        let output = std::process::Command::new("tmux")
+            .arg("-V")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        parse_tmux_version(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    fn init_ui_mode() -> InitUiMode {
+        let Some(version) = Self::read_tmux_version() else {
+            return InitUiMode::Inline;
+        };
+        if tmux_supports_popup(version) {
+            return InitUiMode::Popup { supports_title: tmux_supports_popup_title(version) };
+        }
+        if tmux_supports_split_ui(version) {
+            return InitUiMode::Split;
+        }
+        InitUiMode::Inline
+    }
+
+    fn display_message_format(format: &str) -> Result<String> {
+        let output = std::process::Command::new("tmux")
+            .args(["display-message", "-p", format])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("display-message failed: {stderr}");
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    fn read_init_ui_target_once() -> Option<InitUiTarget> {
+        let client = Self::display_message_format("#{client_name}").ok()?;
+        let pane = Self::display_message_format("#{pane_id}").ok()?;
+        if client.is_empty() || pane.is_empty() {
+            return None;
+        }
+        Some(InitUiTarget { client, pane })
+    }
+
+    fn probe_init_ui_target() -> Option<InitUiTarget> {
+        const INITIAL_BACKOFF_MS: u64 = 20;
+        const MAX_DELAY_MS: u64 = 1_000;
+
+        let mut next_delay_ms = 0;
+        loop {
+            let delay_ms = next_delay_ms;
+            if delay_ms != 0 {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+            }
+            if let Some(target) = Self::read_init_ui_target_once() {
+                return Some(target);
+            }
+            if delay_ms >= MAX_DELAY_MS {
+                break;
+            }
+            next_delay_ms = if next_delay_ms == 0 {
+                INITIAL_BACKOFF_MS
+            } else {
+                next_delay_ms.saturating_mul(2)
+            };
+        }
+        None
+    }
+
+    fn spawn_bootstrap(spec: &InitResumeSpec) -> Result<()> {
+        let command = spec.build_shell_command();
+        let output = std::process::Command::new("tmux")
+            .args(["run-shell", "-b", &command])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("run-shell failed: {stderr}");
+        }
+        Ok(())
+    }
+
+    fn spawn_popup(
+        spec: &InitResumeSpec,
+        target: &InitUiTarget,
+        supports_title: bool,
+    ) -> Result<()> {
+        let wrapper = spec.build_shell_wrapper(None, false);
+        let mut args = vec![
+            "display-popup".to_string(),
+            "-E".to_string(),
+            "-w".to_string(),
+            "80%".to_string(),
+            "-h".to_string(),
+            "80%".to_string(),
+            "-c".to_string(),
+            target.client.clone(),
+        ];
+        if supports_title {
+            args.push("-T".to_string());
+            args.push(" tmup init (press #[bold,fg=red]q#[default] to exit) ".to_string());
+        }
+        args.push("--".to_string());
+        args.push(wrapper);
+        let output = std::process::Command::new("tmux")
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("display-popup failed: {stderr}");
+        }
+        Ok(())
+    }
+
+    fn spawn_split(spec: &InitResumeSpec, target: &InitUiTarget, wait_channel: &str) -> Result<()> {
+        let wrapper = spec.build_shell_wrapper(Some(wait_channel), true);
+        let output = std::process::Command::new("tmux")
+            .args(["split-window", "-v", "-l", "50%", "-t", &target.pane, "--", &wrapper])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("split-window failed: {stderr}");
+        }
+        Ok(())
+    }
+
+    fn wait_for(wait_channel: &str) -> Result<()> {
+        let status =
+            std::process::Command::new("tmux").args(["wait-for", wait_channel]).status()?;
+        if !status.success() {
+            anyhow::bail!("tmux wait-for failed");
+        }
+        Ok(())
     }
 }
 
 impl TmuxAdapter for ProductionTmux {
     fn ui_available(&mut self) -> bool {
-        let mode = tmup::tmux::init_ui_mode();
-        let available = !matches!(mode, tmup::tmux::InitUiMode::Inline);
+        let mode = Self::init_ui_mode();
+        let available = !matches!(mode, InitUiMode::Inline);
         self.ui_mode = Some(mode);
         available
     }
 
     fn current_host_available(&mut self) -> bool {
-        self.target = tmup::tmux::current_init_ui_target();
+        self.target = Self::read_init_ui_target_once();
         self.target.is_some()
     }
 
     fn wait_for_host(&mut self) -> bool {
-        self.target = tmup::tmux::probe_init_ui_target();
+        self.target = Self::probe_init_ui_target();
         self.target.is_some()
     }
 
     fn defer(&mut self, resume_path: &Path) -> Result<()> {
-        tmup::tmux::spawn_init_bootstrap(&Self::bootstrap_spec(resume_path)?)
+        Self::spawn_bootstrap(&Self::resume_spec(resume_path)?)
     }
 
-    fn host_child(&mut self, continuation: Continuation) -> Result<()> {
-        let Continuation::HostedChild(context) = continuation else {
-            anyhow::bail!("only hosted-child continuations can be hosted")
-        };
+    fn host_child(&mut self, handoff: ChildHandoff<'_>) -> Result<()> {
+        let ChildHandoff { context, source, session } = handoff;
         let target = self.target.as_ref().context("tmux host target is unavailable")?;
-        let wait_channel = format!("tmup-init-{}-{}", std::process::id(), epoch_millis());
-        let paths = Paths::from_runtime_roots(
-            context.data_root.clone(),
-            context.state_root.clone(),
-            context.config_path.clone(),
-        )?;
-        let result_file = paths.init_result_path(&wait_channel);
-        let _ = std::fs::remove_file(&result_file);
-        let spec = Self::child_spec(context, wait_channel)?;
-        let result = match self.ui_mode.context("tmux UI availability was not inspected")? {
-            tmup::tmux::InitUiMode::Popup { supports_title } => {
-                tmup::tmux::spawn_init_popup(&spec, target, &result_file, supports_title)?;
-                read_and_cleanup_init_result(&result_file).context("reading popup init result")
+        let mode = self.ui_mode.context("tmux UI availability was not inspected")?;
+        let wait_channel = matches!(mode, InitUiMode::Split)
+            .then(|| format!("tmup-init-{}-{}", std::process::id(), epoch_millis()));
+        let host = match &wait_channel {
+            Some(wait_channel) => record::UiHost::Split { wait_channel: wait_channel.clone() },
+            None => record::UiHost::Popup,
+        };
+        let published = record::publish_ui_child(&context, source, host, session)?;
+        let hosted = (|| {
+            let spec = Self::resume_spec(published.record_path())?;
+            match mode {
+                InitUiMode::Popup { supports_title } => {
+                    Self::spawn_popup(&spec, target, supports_title)?;
+                    record::consume_child_result(published.result_path())
+                        .context("reading popup init result")
+                }
+                InitUiMode::Split => {
+                    let wait_channel = wait_channel.as_deref().unwrap();
+                    Self::spawn_split(&spec, target, wait_channel)?;
+                    Self::wait_for(wait_channel)?;
+                    record::consume_child_result(published.result_path())
+                        .context("reading split init result")
+                }
+                InitUiMode::Inline => {
+                    unreachable!("inline mode cannot host an Init Session child")
+                }
             }
-            tmup::tmux::InitUiMode::Split => {
-                tmup::tmux::spawn_init_split(&spec, target, &result_file)?;
-                tmup::tmux::wait_for(&spec.wait_channel)?;
-                read_and_cleanup_init_result(&result_file).context("reading split init result")
+        })();
+        let cleanup = published.cleanup();
+        let result = match hosted {
+            Ok(result) => {
+                cleanup?;
+                result
             }
-            tmup::tmux::InitUiMode::Inline => {
-                unreachable!("inline mode cannot host an Init Session child")
+            Err(error) => {
+                let _ = cleanup;
+                return Err(error);
             }
-        }?;
-        // The legacy result record contains only an exit code, so it cannot safely
-        // distinguish plugin failures from operation failures. Preserve that transport
-        // until the continuation-record migration and surface either as a reported error.
-        if result == 0 { Ok(()) } else { Err(progress::reported_error()) }
+        };
+        match result {
+            record::ChildResult::Completed => Ok(()),
+            record::ChildResult::CompletedWithPluginFailures { .. }
+            | record::ChildResult::OperationFailed => Err(progress::reported_error()),
+        }
     }
 
     fn display_fallback(&mut self, message: &str) {
@@ -512,23 +755,6 @@ impl TmuxAdapter for ProductionTmux {
     fn execute_load_plan(&mut self, plan: &[TmuxCommand]) -> Result<()> {
         tmup::tmux::execute_plan(plan)
     }
-}
-
-fn read_and_cleanup_init_result(path: &Path) -> Result<i32> {
-    let result = read_init_result(path);
-    let _ = std::fs::remove_file(path);
-    result
-}
-
-fn read_init_result(path: &Path) -> Result<i32> {
-    #[derive(serde::Deserialize)]
-    struct InitResult {
-        exit_code: i32,
-    }
-    let invalid = || format!("init child exited without a valid result record: {}", path.display());
-    let content = std::fs::read_to_string(path).with_context(invalid)?;
-    let result = serde_json::from_str::<InitResult>(&content).with_context(invalid)?;
-    Ok(result.exit_code)
 }
 
 fn epoch_millis() -> u128 {
@@ -584,7 +810,11 @@ mod tests {
         InspectCurrentHost,
         WaitForHost,
         Defer(PathBuf),
-        Host(Continuation),
+        HostChild {
+            context: InvocationContext,
+            source: record::UiChildSource,
+            reuses_session: bool,
+        },
         Fallback(String),
         Waiting,
         Load(Vec<TmuxCommand>),
@@ -658,8 +888,12 @@ mod tests {
             Ok(())
         }
 
-        fn host_child(&mut self, continuation: Continuation) -> Result<()> {
-            self.requests.push(Request::Host(continuation));
+        fn host_child(&mut self, handoff: ChildHandoff<'_>) -> Result<()> {
+            self.requests.push(Request::HostChild {
+                context: handoff.context,
+                source: handoff.source,
+                reuses_session: handoff.session.is_some(),
+            });
             Ok(())
         }
 
@@ -696,6 +930,39 @@ mod tests {
         std::fs::write(&context.config_path, contents).unwrap();
     }
 
+    #[test]
+    fn production_adapter_parses_supported_tmux_versions() {
+        let cases = [
+            ("tmux 3.2", Some((3, 2, None))),
+            ("tmux 3.3a", Some((3, 3, Some('a')))),
+            ("tmux next-3.4", Some((3, 4, None))),
+            ("tmux master", None),
+        ];
+
+        for (input, expected) in cases {
+            let parsed = parse_tmux_version(input).map(|v| (v.major, v.minor, v.suffix));
+            assert_eq!(parsed, expected, "{input} should parse as {expected:?}");
+        }
+    }
+
+    #[test]
+    fn production_adapter_quotes_the_single_resume_transport() {
+        let spec = InitResumeSpec {
+            exe: PathBuf::from("/tmp/tmup it's"),
+            resume_path: PathBuf::from("/tmp/session it's/ui-child.json"),
+        };
+
+        assert_eq!(
+            spec.build_shell_command(),
+            "'/tmp/tmup it'\"'\"'s' 'init' '--resume' '/tmp/session it'\"'\"'s/ui-child.json'"
+        );
+        let popup = spec.build_shell_wrapper(None, false);
+        assert!(!popup.contains("wait-for"));
+        assert!(!popup.contains("TMUP_CONFIG"));
+        assert!(!popup.contains("--ui-child"));
+        assert!(!popup.contains("exit_code"));
+    }
+
     #[tokio::test]
     async fn deferred_session_hosts_child_when_ui_becomes_available() {
         let dir = tempdir().unwrap();
@@ -712,9 +979,104 @@ mod tests {
             vec![
                 Request::InspectUi,
                 Request::WaitForHost,
-                Request::Host(Continuation::HostedChild(context)),
+                Request::HostChild {
+                    context,
+                    source: record::UiChildSource::DeferredBootstrap,
+                    reuses_session: false,
+                },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn resumed_bootstrap_reuses_its_session_for_the_ui_child_handoff() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        let published = record::publish_bootstrap(&context).unwrap();
+        let record_path = published.record_path().to_path_buf();
+        let session_dir = record_path.parent().unwrap().to_path_buf();
+        let mut tmux = MockTmux::hosted();
+
+        let outcome = resume_record_with_adapter(&record_path, &mut tmux).await.unwrap();
+
+        assert_eq!(outcome, Outcome::Completed);
+        assert!(matches!(
+            tmux.requests.as_slice(),
+            [
+                Request::InspectUi,
+                Request::WaitForHost,
+                Request::HostChild {
+                    source: record::UiChildSource::DeferredBootstrap,
+                    reuses_session: true,
+                    ..
+                },
+            ]
+        ));
+        assert!(!session_dir.exists(), "the bootstrap owner must clean its Init Session");
+    }
+
+    #[tokio::test]
+    async fn resumed_ui_child_publishes_completion_after_loading() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        write_config(&context, "");
+        let published = record::publish_ui_child(
+            &context,
+            record::UiChildSource::Direct,
+            record::UiHost::Popup,
+            None,
+        )
+        .unwrap();
+        let record_path = published.record_path().to_path_buf();
+        let result_path = published.result_path().to_path_buf();
+        let session_dir = record_path.parent().unwrap().to_path_buf();
+        let mut tmux = MockTmux::hosted();
+
+        let outcome = resume_record_with_adapter(&record_path, &mut tmux).await.unwrap();
+
+        assert_eq!(outcome, Outcome::Completed);
+        assert!(matches!(tmux.requests.as_slice(), [Request::Load(_)]));
+        assert_eq!(
+            record::consume_child_result(&result_path).unwrap(),
+            record::ChildResult::Completed
+        );
+        assert!(session_dir.exists(), "the hosting parent retains Init Session ownership");
+        published.cleanup().unwrap();
+    }
+
+    #[tokio::test]
+    async fn resumed_ui_child_publishes_operation_failure_and_releases_the_lock() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        write_config(&context, "");
+        std::fs::write(context.config_path.parent().unwrap().join("tmup.lock"), "not json")
+            .unwrap();
+        let lock_path = context.state_root.join("operations.lock");
+        let published = record::publish_ui_child(
+            &context,
+            record::UiChildSource::Direct,
+            record::UiHost::Popup,
+            None,
+        )
+        .unwrap();
+        let record_path = published.record_path().to_path_buf();
+        let result_path = published.result_path().to_path_buf();
+        let mut tmux = MockTmux::hosted();
+
+        let result = resume_record_with_adapter(&record_path, &mut tmux).await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            record::consume_child_result(&result_path).unwrap(),
+            record::ChildResult::OperationFailed
+        );
+        assert!(!tmux.requests.iter().any(|request| matches!(request, Request::Load(_))));
+        assert!(
+            OperationLock::try_acquire(&lock_path).unwrap().is_some(),
+            "the UI child must publish its result after releasing the operation lock"
+        );
+        published.cleanup().unwrap();
     }
 
     #[tokio::test]
@@ -968,7 +1330,11 @@ mod tests {
             vec![
                 Request::InspectUi,
                 Request::InspectCurrentHost,
-                Request::Host(Continuation::HostedChild(context)),
+                Request::HostChild {
+                    context,
+                    source: record::UiChildSource::Direct,
+                    reuses_session: false,
+                },
             ]
         );
     }
@@ -1033,7 +1399,7 @@ mod tests {
         let record_path = published.record_path().to_path_buf();
         let session_dir = record_path.parent().unwrap().to_path_buf();
 
-        let result = resume_bootstrap_record(&record_path).await;
+        let result = resume_record(&record_path).await;
 
         assert!(result.is_err());
         assert!(

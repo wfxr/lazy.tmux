@@ -17,8 +17,6 @@ pub struct Paths {
     pub failures_root: PathBuf,
     /// Operation log files: {state}/logs/
     pub logs_root: PathBuf,
-    /// Short-lived init result files: {state}/init-results/
-    pub init_results_root: PathBuf,
     /// Active config file path
     pub config_path: PathBuf,
     /// Active lock file (usually next to the active config file)
@@ -52,7 +50,6 @@ impl Paths {
             lock_path: state_dir.join("operations.lock"),
             failures_root: state_dir.join("failures"),
             logs_root: state_dir.join("logs"),
-            init_results_root: state_dir.join("init-results"),
             config_path,
             lockfile_path,
             repo_cache_root: data_dir.join(".repos"),
@@ -69,7 +66,6 @@ impl Paths {
             lock_path: state.join("operations.lock"),
             failures_root: state.join("failures"),
             logs_root: state.join("logs"),
-            init_results_root: state.join("init-results"),
             config_path: state.join("tmup.kdl"),
             lockfile_path: state.join("tmup.lock"),
             repo_cache_root: data.join(".repos"),
@@ -90,7 +86,6 @@ impl Paths {
             lock_path: state_root.join("operations.lock"),
             failures_root: state_root.join("failures"),
             logs_root: state_root.join("logs"),
-            init_results_root: state_root.join("init-results"),
             config_path,
             lockfile_path,
             repo_cache_root: data_root.join(".repos"),
@@ -120,7 +115,6 @@ impl Paths {
         fs::create_dir_all(&self.staging_root)?;
         fs::create_dir_all(&self.failures_root)?;
         fs::create_dir_all(&self.logs_root)?;
-        fs::create_dir_all(&self.init_results_root)?;
         fs::create_dir_all(&self.repo_cache_root)?;
         if let Some(parent) = self.lock_path.parent() {
             fs::create_dir_all(parent)?;
@@ -136,12 +130,6 @@ impl Paths {
     /// The state root is the parent of `failures_root`.
     pub fn state_root(&self) -> &Path {
         self.failures_root.parent().expect("failures_root must have a parent")
-    }
-
-    /// Derive the init result file path from a wait-channel string.
-    pub fn init_result_path(&self, wait_channel: &str) -> PathBuf {
-        let hash = build_command_hash(wait_channel);
-        self.init_results_root.join(format!("{}.json", &hash[..16]))
     }
 
     /// Get the install directory for a remote plugin by id.
