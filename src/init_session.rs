@@ -127,9 +127,16 @@ pub(crate) async fn resume(continuation: Continuation) -> Result<Outcome> {
 async fn resume_bootstrap_record(path: &Path) -> Result<Outcome> {
     let claimed = record::claim_bootstrap(path)?;
     let (context, owner) = claimed.into_parts();
-    let outcome = resume(Continuation::DeferredBootstrap(context)).await?;
-    owner.cleanup()?;
-    Ok(outcome)
+    match resume(Continuation::DeferredBootstrap(context)).await {
+        Ok(outcome) => {
+            owner.cleanup()?;
+            Ok(outcome)
+        }
+        Err(error) => {
+            let _ = owner.cleanup();
+            Err(error)
+        }
+    }
 }
 
 fn finish(outcome: Outcome, failures_already_reported: bool) -> Result<()> {
@@ -981,5 +988,25 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!tmux.requests.iter().any(|request| matches!(request, Request::Load(_))));
+    }
+
+    #[tokio::test]
+    async fn resumed_session_cleans_its_directory_after_an_operation_error() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        write_config(&context, "");
+        std::fs::write(context.config_path.parent().unwrap().join("tmup.lock"), "not json")
+            .unwrap();
+        let published = record::publish_bootstrap(&context).unwrap();
+        let record_path = published.record_path().to_path_buf();
+        let session_dir = record_path.parent().unwrap().to_path_buf();
+
+        let result = resume_bootstrap_record(&record_path).await;
+
+        assert!(result.is_err());
+        assert!(
+            !session_dir.exists(),
+            "the resumed owner must clean its session after a handled error"
+        );
     }
 }
