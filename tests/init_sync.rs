@@ -361,6 +361,38 @@ fn public_init_hard_condition_error_precedes_managed_directory_creation() {
 
 #[cfg(unix)]
 #[test]
+fn public_init_hard_load_condition_error_precedes_managed_directory_creation() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config/tmux/tmup.kdl");
+    write_file(&config_path, r#"plugin "user/repo" cond="kill -TERM $$""#);
+    let path = std::env::var("PATH").unwrap_or_default();
+
+    let output = public_init_command(&config_path, dir.path(), &path).output().unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("cond shell predicate terminated by a signal"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for managed_path in [
+        dir.path().join("data/tmup/plugins"),
+        dir.path().join("data/tmup/.staging"),
+        dir.path().join("data/tmup/.repos"),
+        dir.path().join("state/tmup/failures"),
+        dir.path().join("state/tmup/logs"),
+    ] {
+        assert!(
+            !managed_path.exists(),
+            "hard load condition error must precede managed-state creation: {}",
+            managed_path.display()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn public_init_does_not_advance_a_locked_remote_revision() {
     let dir = tempdir().unwrap();
     let bare = make_remote_repo(dir.path());

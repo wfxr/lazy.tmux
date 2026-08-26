@@ -8,7 +8,7 @@ use owo_colors::OwoColorize;
 use tabled::builder::Builder;
 use tabled::settings::object::Segment;
 use tabled::settings::{Alignment, Modify, Style};
-use tmup::config_mode::{self, ConfigMode, TpmConfigPolicy};
+use tmup::config_mode::{self, ConfigMode, LoadEligibility, ResolutionIntent, TpmConfigPolicy};
 use tmup::planner::{BuildStatus, PluginState, PluginStatus};
 use tmup::progress::{self, NullReporter, OperationStage, ProgressEvent, ProgressReporter};
 use tmup::state::{OperationLock, Paths};
@@ -133,7 +133,7 @@ fn resolve_explicit_config_path(path: PathBuf) -> Result<PathBuf> {
 
 struct AppliedConfig {
     paths: Paths,
-    config: tmup::model::Config,
+    config: config_mode::ResolvedConfig,
     warnings: Vec<String>,
 }
 
@@ -144,10 +144,20 @@ fn emit_config_warnings(warnings: &[String]) {
 }
 
 fn apply_config(paths: &Paths, mode: ConfigMode, create_missing: bool) -> Result<AppliedConfig> {
+    apply_config_with_intent(paths, mode, create_missing, ResolutionIntent::ManagedState)
+}
+
+fn apply_config_with_intent(
+    paths: &Paths,
+    mode: ConfigMode,
+    create_missing: bool,
+    intent: ResolutionIntent,
+) -> Result<AppliedConfig> {
     let request = config_mode::LoadRequest::from_command(
         mode,
         create_missing,
         default_tpm_config_policy(mode),
+        intent,
     );
     let loaded = config_mode::load_with_request(paths, request)?;
     let applied =
@@ -181,7 +191,7 @@ async fn run_install(id: Option<String>, config_mode: ConfigMode) -> Result<()> 
         .context("another tmup operation is in progress")?;
     let applied = apply_config(&paths, config_mode, true)?;
     let paths = applied.paths;
-    let cfg = applied.config;
+    let cfg = applied.config.into_config();
     cfg.validate_target_id(id.as_deref())?;
     let mut lock = load_lockfile(&paths)?;
     paths.ensure_dirs()?;
@@ -215,7 +225,7 @@ async fn run_sync(id: Option<String>, config_mode: ConfigMode) -> Result<()> {
         .context("another tmup operation is in progress")?;
     let applied = apply_config(&paths, config_mode, true)?;
     let paths = applied.paths;
-    let cfg = applied.config;
+    let cfg = applied.config.into_config();
     cfg.validate_target_id(id.as_deref())?;
     let mut lock = load_lockfile(&paths)?;
     paths.ensure_dirs()?;
@@ -247,7 +257,7 @@ async fn run_update(id: Option<String>, config_mode: ConfigMode) -> Result<()> {
         .context("another tmup operation is in progress")?;
     let applied = apply_config(&paths, config_mode, true)?;
     let paths = applied.paths;
-    let cfg = applied.config;
+    let cfg = applied.config.into_config();
     cfg.validate_target_id(id.as_deref())?;
     let mut lock = load_lockfile(&paths)?;
     paths.ensure_dirs()?;
@@ -281,7 +291,7 @@ async fn run_restore(id: Option<String>, config_mode: ConfigMode) -> Result<()> 
         .context("another tmup operation is in progress")?;
     let applied = apply_config(&paths, config_mode, true)?;
     let paths = applied.paths;
-    let cfg = applied.config;
+    let cfg = applied.config.into_config();
     cfg.validate_target_id(id.as_deref())?;
     let mut lock = load_lockfile(&paths)?;
     paths.ensure_dirs()?;
@@ -319,7 +329,7 @@ async fn run_clean(config_mode: ConfigMode) -> Result<()> {
         .context("another tmup operation is in progress")?;
     let applied = apply_config(&paths, config_mode, true)?;
     let paths = applied.paths;
-    let cfg = applied.config;
+    let cfg = applied.config.into_config();
     let mut lock = load_lockfile(&paths)?;
     let sync_outcome = sync::run_and_write(
         &cfg,
@@ -337,9 +347,12 @@ async fn run_clean(config_mode: ConfigMode) -> Result<()> {
 
 fn run_list(verbose: bool, config_mode: ConfigMode) -> Result<()> {
     let paths = resolve_runtime_paths()?;
-    let applied = apply_config(&paths, config_mode, false)?;
+    let applied =
+        apply_config_with_intent(&paths, config_mode, false, ResolutionIntent::LoadEligibility)?;
     let paths = applied.paths;
     let cfg = applied.config;
+    let load_eligibility =
+        cfg.load_eligibility().context("list configuration did not resolve Load Eligibility")?;
     let lock = load_lockfile(&paths)?;
     let statuses = plugin::list(&cfg, &lock, &paths)?;
 
@@ -348,44 +361,56 @@ fn run_list(verbose: bool, config_mode: ConfigMode) -> Result<()> {
     }
 
     if verbose {
-        print_verbose_statuses(&statuses)?;
+        print_verbose_statuses(&statuses, load_eligibility)?;
     } else {
-        print_default_statuses(&statuses)?;
+        print_default_statuses(&statuses, load_eligibility)?;
     }
 
     Ok(())
 }
 
-fn print_default_statuses(statuses: &[PluginStatus]) -> Result<()> {
-    let rows = statuses.iter().map(|s| {
+fn print_default_statuses(
+    statuses: &[PluginStatus],
+    load_eligibility: LoadEligibility<'_>,
+) -> Result<()> {
+    let rows = load_eligibility.align(statuses)?.map(|(s, load_eligible)| {
         vec![
             s.source.clone(),
             s.kind.clone(),
             style_state(s.state),
             style_build_status(s.build_status),
+            style_load_eligibility(load_eligible),
             style_lock_status(s.current_commit.as_deref(), s.lock_commit.as_deref()),
         ]
     });
-    write_table(&render_table(["Plugin", "Kind", "State", "Build", "Lock"], rows))
+    write_table(&render_table(["Plugin", "Kind", "State", "Build", "Load", "Lock"], rows))
 }
 
-fn print_verbose_statuses(statuses: &[PluginStatus]) -> Result<()> {
-    let rows = statuses.iter().map(|s| {
+fn print_verbose_statuses(
+    statuses: &[PluginStatus],
+    load_eligibility: LoadEligibility<'_>,
+) -> Result<()> {
+    let rows = load_eligibility.align(statuses)?.map(|(s, load_eligible)| {
         vec![
             s.id.clone(),
             s.name.clone(),
             s.kind.clone(),
             style_state(s.state),
             style_build_status(s.build_status),
+            style_load_eligibility(load_eligible),
             style_commit(s.current_commit.as_deref()),
             style_commit(s.lock_commit.as_deref()),
             s.source.clone(),
         ]
     });
     write_table(&render_table(
-        ["Id", "Name", "Kind", "State", "Build", "Current", "Expected", "Source"],
+        ["Id", "Name", "Kind", "State", "Build", "Load", "Current", "Expected", "Source"],
         rows,
     ))
+}
+
+fn style_load_eligibility(load_eligible: bool) -> String {
+    if load_eligible { "yes".green().to_string() } else { "no".dimmed().to_string() }
 }
 
 fn style_state(state: PluginState) -> String {

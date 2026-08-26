@@ -113,3 +113,19 @@ fn targeted_lifecycle_commands_reject_disabled_plugins_as_unknown() {
             .stderr(predicate::str::contains("unknown plugin id"));
     }
 }
+
+#[test]
+fn standalone_lifecycle_commands_do_not_evaluate_load_conditions() {
+    let dir = tempdir().unwrap();
+    make_remote_repo(dir.path());
+    let config_path = dir.path().join("config/tmux/tmup.kdl");
+    write_file(
+        &config_path,
+        r#"plugin "https://example.com/test/plugin.git" cond="kill -TERM $$""#,
+    );
+    let gitconfig = write_git_rewrite_config(dir.path());
+
+    for command in ["sync", "install", "update", "restore", "clean"] {
+        cargo_cmd(dir.path(), &config_path, &gitconfig).arg(command).assert().success();
+    }
+}

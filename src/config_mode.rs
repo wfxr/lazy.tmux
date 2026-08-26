@@ -1,11 +1,12 @@
 use std::fmt;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
 
 use crate::config::{Condition, ParsedConfig, PluginDeclaration};
-use crate::model::Config;
+use crate::model::{Config, PluginSpec};
 use crate::state::Paths;
 use crate::{config, config_tpm};
 
@@ -19,6 +20,84 @@ pub enum ConfigMode {
     Pure,
     /// Load both config sources and merge them.
     Mixed,
+}
+
+/// Condition results required by a configuration-loading caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionIntent {
+    /// Resolve only the Effective Plugin Specification used for managed state.
+    ManagedState,
+    /// Also resolve Load Eligibility for each enabled plugin.
+    LoadEligibility,
+}
+
+/// One resolved Effective Plugin Specification with optional Load Eligibility.
+#[derive(Debug)]
+pub struct ResolvedConfig {
+    config: Config,
+    load_eligibility: Option<Vec<bool>>,
+}
+
+impl ResolvedConfig {
+    fn new(config: Config, load_eligibility: Option<Vec<bool>>) -> Self {
+        debug_assert!(
+            load_eligibility
+                .as_ref()
+                .is_none_or(|eligibility| eligibility.len() == config.plugins.len())
+        );
+        Self { config, load_eligibility }
+    }
+
+    /// Borrow Load Eligibility tied to this snapshot's ordered plugins.
+    pub fn load_eligibility(&self) -> Option<LoadEligibility<'_>> {
+        self.load_eligibility
+            .as_deref()
+            .map(|values| LoadEligibility { plugins: &self.config.plugins, values })
+    }
+
+    /// Discard optional loading metadata and return the managed-state config.
+    pub fn into_config(self) -> Config {
+        self.config
+    }
+}
+
+impl Deref for ResolvedConfig {
+    type Target = Config;
+
+    fn deref(&self) -> &Self::Target {
+        &self.config
+    }
+}
+
+/// Load Eligibility paired with the ordered plugins from one resolved snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct LoadEligibility<'snapshot> {
+    plugins: &'snapshot [PluginSpec],
+    values: &'snapshot [bool],
+}
+
+impl<'snapshot> LoadEligibility<'snapshot> {
+    /// Iterate over the snapshot's plugins and their Load Eligibility together.
+    pub fn plugins(self) -> impl Iterator<Item = (&'snapshot PluginSpec, bool)> {
+        self.plugins.iter().zip(self.values.iter().copied())
+    }
+
+    /// Pair another plugin-ordered result set with this snapshot's eligibility.
+    pub fn align<T>(
+        self,
+        items: &'snapshot [T],
+    ) -> Result<impl Iterator<Item = (&'snapshot T, bool)>> {
+        anyhow::ensure!(
+            items.len() == self.values.len(),
+            "plugin-ordered results and Load Eligibility snapshot are inconsistent"
+        );
+        Ok(items.iter().zip(self.values.iter().copied()))
+    }
+
+    /// Borrow the ordered eligibility values for diagnostics and assertions.
+    pub fn values(self) -> &'snapshot [bool] {
+        self.values
+    }
 }
 
 /// Policy for handling the primary tmup.kdl during config load.
@@ -50,6 +129,8 @@ pub struct LoadRequest {
     pub tmup_policy: TmupConfigPolicy,
     /// How the optional TPM-compatible tmux config should be sourced.
     pub tpm_policy: TpmConfigPolicy,
+    /// Whether the caller needs Load Eligibility in addition to managed state.
+    pub intent: ResolutionIntent,
 }
 
 impl LoadRequest {
@@ -58,13 +139,14 @@ impl LoadRequest {
         mode: ConfigMode,
         create_missing: bool,
         tpm_policy: TpmConfigPolicy,
+        intent: ResolutionIntent,
     ) -> Self {
         let tmup_policy = if create_missing {
             TmupConfigPolicy::CreateIfMissing
         } else {
             TmupConfigPolicy::ReadOnly
         };
-        Self { mode, tmup_policy, tpm_policy }
+        Self { mode, tmup_policy, tpm_policy, intent }
     }
 }
 
@@ -81,7 +163,7 @@ impl fmt::Display for ConfigMode {
 #[derive(Debug)]
 pub struct LoadedConfig {
     /// The normalized effective configuration.
-    pub config: Config,
+    pub config: ResolvedConfig,
     /// Warnings emitted while loading or merging config sources.
     pub warnings: Vec<String>,
     /// The resolved primary config path that should own the active lockfile.
@@ -94,7 +176,7 @@ pub struct LoadedConfig {
 #[derive(Debug)]
 pub struct LoadedRequest {
     /// The normalized effective configuration.
-    pub config: Config,
+    pub config: ResolvedConfig,
     /// Warnings emitted while loading or merging config sources.
     pub warnings: Vec<String>,
     /// Runtime paths retargeted to the resolved active config and lockfile pair.
@@ -116,12 +198,22 @@ pub fn load_from_sources(
     tmup_path: Option<&Path>,
     tpm_path: Option<&Path>,
 ) -> Result<LoadedConfig> {
+    load_from_sources_with_intent(mode, tmup_path, tpm_path, ResolutionIntent::ManagedState)
+}
+
+/// Load configuration from explicit source paths for a concrete resolution intent.
+pub fn load_from_sources_with_intent(
+    mode: ConfigMode,
+    tmup_path: Option<&Path>,
+    tpm_path: Option<&Path>,
+    intent: ResolutionIntent,
+) -> Result<LoadedConfig> {
     match mode {
         ConfigMode::Pure => {
             let path = tmup_path.context("tmup config file not found")?;
-            resolve_loaded_config(load_tmup_config(path)?, path, None)
+            resolve_loaded_config(load_tmup_config(path)?, path, None, intent)
         }
-        ConfigMode::Mixed => load_mixed(tmup_path, tpm_path),
+        ConfigMode::Mixed => load_mixed(tmup_path, tpm_path, intent),
     }
 }
 
@@ -132,16 +224,17 @@ pub fn load_with_request(paths: &Paths, request: LoadRequest) -> Result<LoadedRe
         ConfigMode::Pure => (
             {
                 let parsed = load_tmup_config_for_policy(&tmup_path, request.tmup_policy)?;
-                resolve_loaded_config(parsed, &tmup_path, None)?
+                resolve_loaded_config(parsed, &tmup_path, None, request.intent)?
             },
             TpmConfigPolicy::Disabled,
         ),
         ConfigMode::Mixed => {
             let (tpm_path, warnings) = resolve_tpm_config_path(request.tpm_policy)?;
-            let mut loaded = load_from_sources(
+            let mut loaded = load_from_sources_with_intent(
                 ConfigMode::Mixed,
                 Some(tmup_path.as_path()),
                 tpm_path.as_deref(),
+                request.intent,
             )?;
             loaded.warnings.extend(warnings);
             (loaded, TpmConfigPolicy::Resolved(tpm_path))
@@ -158,7 +251,11 @@ pub fn load_with_request(paths: &Paths, request: LoadRequest) -> Result<LoadedRe
     })
 }
 
-fn load_mixed(tmup_path: Option<&Path>, tpm_path: Option<&Path>) -> Result<LoadedConfig> {
+fn load_mixed(
+    tmup_path: Option<&Path>,
+    tpm_path: Option<&Path>,
+    intent: ResolutionIntent,
+) -> Result<LoadedConfig> {
     let tmup_path = tmup_path.context("tmup config file not found")?;
     let tpm_config = tpm_path.map(config_tpm::load_config_from_path).transpose()?;
     let tmup_config = load_tmup_config_or_default(tmup_path)?;
@@ -167,22 +264,27 @@ fn load_mixed(tmup_path: Option<&Path>, tpm_path: Option<&Path>) -> Result<Loade
         Some(tpm) => merge_configs(tmup_config, tpm),
         None => tmup_config,
     };
-    resolve_loaded_config(parsed, tmup_path, tpm_path.map(Path::to_path_buf))
+    resolve_loaded_config(parsed, tmup_path, tpm_path.map(Path::to_path_buf), intent)
 }
 
 fn resolve_loaded_config(
     parsed: ParsedConfig,
     active_config_path: &Path,
     tpm_config_path: Option<PathBuf>,
+    intent: ResolutionIntent,
 ) -> Result<LoadedConfig> {
     let working_dir = active_config_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let ParsedConfig { options, plugins, warnings } = parsed;
-    let plugins = condition::project_enabled_plugins(plugins, working_dir)?;
+    let resolved = condition::resolve_plugins(plugins, working_dir, intent)?;
+    let config = ResolvedConfig::new(
+        Config { options, plugins: resolved.plugins },
+        resolved.load_eligibility,
+    );
     Ok(LoadedConfig {
-        config: Config { options, plugins },
+        config,
         warnings,
         active_config_path: active_config_path.to_path_buf(),
         tpm_config_path,
@@ -245,7 +347,11 @@ fn merge_configs(mut kdl: ParsedConfig, tpm: Config) -> ParsedConfig {
                 "plugin \"{id}\" declared in both tmup.kdl and TPM config; using tmup.kdl entry"
             ));
         } else {
-            merged.push(PluginDeclaration { spec: plugin, enabled: Condition::Bool(true) });
+            merged.push(PluginDeclaration {
+                spec: plugin,
+                enabled: Condition::Bool(true),
+                cond: Condition::Bool(true),
+            });
         }
     }
 

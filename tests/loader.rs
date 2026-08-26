@@ -1,7 +1,22 @@
 use tempfile::tempdir;
-use tmup::config::parse_config;
+use tmup::config_mode::{
+    ConfigMode, ResolutionIntent, ResolvedConfig, load_from_sources_with_intent,
+};
 use tmup::loader::build_load_plan;
 use tmup::tmux::TmuxCommand;
+
+fn resolve_config(root: &std::path::Path, input: &str) -> ResolvedConfig {
+    let path = root.join("tmup.kdl");
+    std::fs::write(&path, input).unwrap();
+    load_from_sources_with_intent(
+        ConfigMode::Pure,
+        Some(&path),
+        None,
+        ResolutionIntent::LoadEligibility,
+    )
+    .unwrap()
+    .config
+}
 
 #[test]
 fn loader_sets_env_then_opts_then_runs_tmux_files_in_order() {
@@ -14,16 +29,16 @@ fn loader_sets_env_then_opts_then_runs_tmux_files_in_order() {
     std::fs::write(plugin_dir.join("10-second.tmux"), "#!/bin/sh").unwrap();
     std::fs::write(plugin_dir.join("00-first.tmux"), "#!/bin/sh").unwrap();
 
-    let config = parse_config(
+    let config = resolve_config(
+        dir.path(),
         r##"
 plugin "user/plugin-a" opt-prefix="pa_" {
     opt "theme" "dark"
 }
     "##,
-    )
-    .unwrap();
+    );
 
-    let plan = build_load_plan(&config, &plugin_root);
+    let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
 
     // 1. First command should be SetEnvironment
     assert!(
@@ -62,15 +77,15 @@ fn loader_preserves_plugin_declaration_order() {
     std::fs::write(plugin_a.join("a.tmux"), "#!/bin/sh").unwrap();
     std::fs::write(plugin_b.join("b.tmux"), "#!/bin/sh").unwrap();
 
-    let config = parse_config(
+    let config = resolve_config(
+        dir.path(),
         r#"
 plugin "user/plugin-a"
 plugin "user/plugin-b"
     "#,
-    )
-    .unwrap();
+    );
 
-    let plan = build_load_plan(&config, &plugin_root);
+    let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
 
     // After env setup, plugin-a runs before plugin-b
     let run_shells: Vec<_> = plan
@@ -93,8 +108,8 @@ fn loader_handles_missing_plugin_dir() {
     let plugin_root = dir.path().join("plugins");
     // Don't create any plugin directories
 
-    let config = parse_config(r#"plugin "user/missing""#).unwrap();
-    let plan = build_load_plan(&config, &plugin_root);
+    let config = resolve_config(dir.path(), r#"plugin "user/missing""#);
+    let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
 
     // Should have env setup but no RunShell (plugin dir doesn't exist)
     assert_eq!(plan.len(), 1); // just SetEnvironment
@@ -106,17 +121,17 @@ fn loader_applies_opt_prefix() {
     let plugin_root = dir.path().join("plugins");
     std::fs::create_dir_all(plugin_root.join("github.com/catppuccin/tmux")).unwrap();
 
-    let config = parse_config(
+    let config = resolve_config(
+        dir.path(),
         r##"
 plugin "catppuccin/tmux" opt-prefix="catppuccin_" {
     opt "flavor" "mocha"
     opt "window_text" "#W"
 }
     "##,
-    )
-    .unwrap();
+    );
 
-    let plan = build_load_plan(&config, &plugin_root);
+    let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
 
     let opts: Vec<_> = plan
         .iter()
@@ -135,5 +150,44 @@ plugin "catppuccin/tmux" opt-prefix="catppuccin_" {
             ("catppuccin_flavor".into(), "mocha".into()),
             ("catppuccin_window_text".into(), "#W".into()),
         ]
+    );
+}
+
+#[test]
+fn loader_skips_options_and_scripts_for_plugins_without_load_eligibility() {
+    let dir = tempdir().unwrap();
+    let plugin_root = dir.path().join("plugins");
+    for name in ["load-first", "skip", "load-last"] {
+        let plugin_dir = plugin_root.join(format!("github.com/user/{name}"));
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join(format!("{name}.tmux")), "#!/bin/sh").unwrap();
+    }
+    let config = resolve_config(
+        dir.path(),
+        r#"
+plugin "user/load-first" opt-prefix="first_" { opt "mode" "yes" }
+plugin "user/skip" cond=#false opt-prefix="skip_" { opt "mode" "no" }
+plugin "user/load-last" opt-prefix="last_" { opt "mode" "yes" }
+"#,
+    );
+
+    let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
+
+    assert!(matches!(plan.first(), Some(TmuxCommand::SetEnvironment { .. })));
+    assert!(!plan.iter().any(|command| match command {
+        TmuxCommand::SetOption { key, .. } => key.starts_with("skip_"),
+        TmuxCommand::RunShell { script } => script.ends_with("skip.tmux"),
+        TmuxCommand::SetEnvironment { .. } => false,
+    }));
+    let scripts: Vec<_> = plan
+        .iter()
+        .filter_map(|command| match command {
+            TmuxCommand::RunShell { script } => script.file_name().map(|name| name.to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        scripts,
+        [std::ffi::OsString::from("load-first.tmux"), std::ffi::OsString::from("load-last.tmux")]
     );
 }

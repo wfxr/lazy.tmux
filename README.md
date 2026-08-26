@@ -51,6 +51,8 @@ lazy.nvim's design philosophy to tmux:
   any plugin fails.
 - **TPM-compatible** — plugins that use `@option` + `*.tmux` entry scripts work
   out of the box.
+- **Conditional inclusion and loading** — reuse one config across hosts while
+  choosing independently whether tmup manages or loads each plugin.
 
 ## Installation
 
@@ -232,9 +234,8 @@ tmup supports two internal config loading modes:
 - `pure` — load only `tmup.kdl`
 - `mixed` — load `tmup.kdl` and TPM-style tmux plugin declarations together
 
-Use `--tpm` on any command that reads config when you want to temporarily
-combine `tmup.kdl` with existing `set -g @plugin ...` lines from your tmux
-config.
+Set `TMUP_CONFIG_MODE=mixed` for a command when you want to combine `tmup.kdl`
+with existing `set -g @plugin ...` lines from your tmux config.
 
 In mixed mode, plugin order starts from the TPM-compatible declarations
 discovered by tmup's TPM scan. KDL-only entries, including local plugins, are
@@ -273,6 +274,12 @@ plugin "https://gitlab.com/user/my-plugin.git"
 // Local plugin — loaded in-place, not in the lock snapshot
 plugin "~/dev/my-tmux-plugin" local=#true name="my-plugin-dev"
 
+// Manage this plugin only on one stable execution host
+plugin "company/workstation-tools" enabled="test \"$(hostname)\" = workstation"
+
+// Keep this plugin managed, but skip its options and scripts in SSH environments
+plugin "company/desktop-tools" cond="test -z \"${SSH_CONNECTION:-}\""
+
 // Disable with KDL slashdash
 /-plugin "tmux-plugins/tmux-continuum"
 ```
@@ -297,6 +304,8 @@ plugin "~/dev/my-tmux-plugin" local=#true name="my-plugin-dev"
 | `commit` | string | — | Pin to a commit (update skips) |
 | `local` | bool | `#false` | Treat source as a local path; after expansion it must be absolute |
 | `build` | string | — | Shell command to run after sync/update/restore publishes a revision |
+| `enabled` | bool or string | `#true` | Include the plugin in this host's Effective Plugin Specification |
+| `cond` | bool or string | `#true` | Give the enabled plugin Load Eligibility for `init` |
 
 > `branch`, `tag`, and `commit` are mutually exclusive.
 >
@@ -306,18 +315,14 @@ plugin "~/dev/my-tmux-plugin" local=#true name="my-plugin-dev"
 > Sync hashes the canonical remote identity, tracking selector, and `build`.
 > Equivalent remote spellings such as `.git` vs no `.git` do not trigger sync.
 > Comments, formatting, `name`, `opt`, `opt-prefix`, and local-plugin-only
-> changes do not trigger sync.
+> changes do not trigger sync. Condition values, expression text, and Load
+> Eligibility also do not affect lock fingerprints.
 
-### Conditional plugins (unreleased)
+### Conditional plugins
 
 Conditional plugin declarations separate whether tmup manages a plugin from
 whether an Init Session loads it. This design applies to both remote and local
 plugins.
-
-<!-- prettier-ignore -->
-> [!NOTE]
-> Conditional plugin properties are accepted for a future release but are not
-> implemented in v0.1.0 or the current codebase.
 
 Both properties default to true and accept either a KDL bool or a non-empty
 shell predicate string:
@@ -330,7 +335,7 @@ plugin "company/workstation-tools" enabled="test \"$(hostname)\" = workstation"
 plugin "tmux-plugins/tmux-yank" cond="test -z \"${SSH_CONNECTION:-}\""
 ```
 
-`enabled=#false` excludes the plugin from the effective plugin specification.
+`enabled=#false` excludes the plugin from the Effective Plugin Specification.
 The plugin does not participate in lifecycle commands, list output, targeted
 selectors, or the lock snapshot. If a previously enabled remote plugin becomes
 disabled, `sync` drops its lock entry and a later `clean` may remove its managed
@@ -342,16 +347,25 @@ or build failures still make `init` return a non-zero status. Changing `cond`
 from true to false does not undo effects from an earlier load; restart the tmux
 server when you need to clear those effects.
 
-String predicates run with `/bin/sh`, inherit the tmup process environment, use
-the configuration directory as their working directory, and time out after
+String predicates run with `/bin/sh -c`, inherit the tmup process environment,
+use the configuration directory as their working directory, and time out after
 five seconds. Exit status zero means true and every non-zero status means false.
-Predicates must be fast, side-effect-free, and independent of plugin state that
-the current command may change.
+tmup discards ordinary predicate output. Failure to start the shell, signal
+termination, and timeout are hard errors. Predicates must be fast,
+side-effect-free, and independent of plugin state that the current command may
+change.
 
 Every command evaluates `enabled` from its own environment. Only `init` and
 `list` evaluate `cond`; `list` reports the current result as `LOAD=yes` or
 `LOAD=no`. This value describes whether a future Init Session would load the
 plugin, not whether a previous load still affects the tmux server.
+
+tmup validates all declarations and merges mixed-mode sources before running
+predicates. It evaluates Enable Conditions sequentially in effective
+declaration order, then evaluates Load Conditions only for enabled plugins.
+Each command freezes one result snapshot. An Init Session may evaluate an
+advisory preview, but its final execution rereads the inherited config and
+resolves one authoritative snapshot before managed-state mutation.
 
 Use stable host properties for `enabled`. Environment values such as
 `SSH_CONNECTION` may differ between direct shell commands and commands launched
@@ -363,9 +377,11 @@ TPM-only declarations are unconditional. A matching KDL declaration with
 declaration.
 
 Unknown plugin parameters produce warnings and are otherwise ignored. Invalid
-values for `enabled` or `cond`, duplicate known scalar properties, and reserved
-condition child or type-annotation syntax are errors. Older tmup versions may
-ignore condition properties and load affected plugins unconditionally.
+values for `enabled` or `cond`, empty predicate strings, duplicate known scalar
+properties, and reserved condition child or type-annotation syntax are errors.
+Older tmup versions may ignore condition properties and load affected plugins
+unconditionally, so conditional configs require a version that documents these
+properties.
 
 ### Option mechanism
 
@@ -387,22 +403,25 @@ tmup clean              # Remove undeclared managed remote repos
 tmup list [-v]          # Print plugin status table (`-v` for diagnostic columns)
 ```
 
-Commands that read config also accept `--tpm` to enable mixed loading with
-TPM-style declarations.
+Set `TMUP_CONFIG_MODE=mixed` to enable mixed loading with TPM-style
+declarations for any command that reads config.
 
 ### `init` — startup path
 
 Designed for `run-shell "tmup init"` in `.tmux.conf`.
 
-1. **Acquire global lock** — held from start through plugin loading, preventing
-   concurrent writers from modifying plugin state during init.
-2. **Implicit sync** — reconcile `tmup.kdl` into `tmup.lock` before any
+1. **Acquire global lock** — hold it through final condition resolution, sync,
+   and plugin loading so concurrent writers cannot modify state mid-init.
+2. **Resolve conditions** — reread the inherited config and freeze one
+   authoritative Effective Plugin Specification and Load Eligibility snapshot.
+3. **Implicit sync** — reconcile `tmup.kdl` into `tmup.lock` before any
    mutating work. Existing declared plugins may be repaired; removed plugins
    drop lock entries immediately.
-3. **Respect init policy** — newly declared remote plugins are installed only
+4. **Respect init policy** — newly declared remote plugins are installed only
    when `auto-install=true`. Use `tmup clean` to remove undeclared plugin
    directories.
-4. **Load tmux state** — set options and source `*.tmux` files after sync.
+5. **Load tmux state** — for plugins with Load Eligibility, set options and
+   source `*.tmux` files after sync.
 
 `init` never advances floating selectors beyond what config declares. Known
 build failures are still recorded and surfaced, but because startup begins with
@@ -451,6 +470,11 @@ Outputs a table with separated **state** and **last-result** columns:
 | `build-failed` | Build command failed (marker recorded) |
 | `none` | No operation attempted yet |
 
+The `Load` column reports `yes` or `no` independently from the state, build,
+and lock columns. `no` means the plugin's current Load Condition prevents a
+future Init Session from loading it; it does not mean earlier tmux effects have
+been unloaded.
+
 If the lock snapshot is stale relative to the effective configuration for the
 selected mode, `list` prints a warning before the table without mutating
 `tmup.lock` or plugin state.
@@ -462,7 +486,7 @@ Default layout when using `~/.config/tmux/tmup.kdl`:
 ```
 ~/.config/tmux/
   ├── tmup.kdl                          # configuration
-  └── tmup.lock                     # resolved snapshot (commit to VCS)
+  └── tmup.lock                         # resolved snapshot
 
 ~/.local/share/tmup/
   ├── plugins/                          # installed plugins
@@ -508,17 +532,19 @@ This boundary is intentional, not an oversight.
 
 ## Migrating from TPM
 
-1. Replace the TPM `run` line in `.tmux.conf` with `run-shell "tmup init --tpm"`.
+1. Replace the TPM `run` line in `.tmux.conf` with
+   `run-shell "TMUP_CONFIG_MODE=mixed tmup init"`.
 2. Restart tmux. tmup will read both `tmup.kdl` and existing TPM-style
    `set -g @plugin` declarations, then generate `tmup.lock`.
 3. Move plugins gradually from `.tmux.conf` into `~/.config/tmux/tmup.kdl`.
 4. Once migration is complete, switch back to plain `run-shell "tmup init"`.
-5. Commit `tmup.kdl` and `tmup.lock` to your dotfiles repo.
+5. Commit `tmup.kdl` to your dotfiles repo.
 6. Remove the old `~/.tmux/plugins/` directory when satisfied.
 
 ## Roadmap
 
 - [x] **Concurrent operations** — parallel git clone/fetch across plugins (`concurrency` config option)
+- [x] **Conditional plugins** — host-specific managed state and independent Load Eligibility
 - [ ] **Incremental fetch** — reuse healthy local repos (fetch + resolve) instead of fresh clone on every sync/install
 
 ## License

@@ -85,3 +85,21 @@ fn enable_condition_expression_text_does_not_affect_fingerprints() {
     );
     assert_eq!(config_fingerprint(&first.config), config_fingerprint(&second.config));
 }
+
+#[test]
+fn load_conditions_do_not_affect_plugin_or_config_fingerprints() {
+    let dir = tempdir().unwrap();
+    let first = dir.path().join("first/tmup.kdl");
+    let second = dir.path().join("second/tmup.kdl");
+    write_file(&first, r#"plugin "user/repo" cond=#false"#);
+    write_file(&second, r#"plugin "user/repo" cond="kill -TERM $$""#);
+
+    let first = load_from_sources(ConfigMode::Pure, Some(&first), None).unwrap();
+    let second = load_from_sources(ConfigMode::Pure, Some(&second), None).unwrap();
+
+    assert_eq!(
+        remote_plugin_config_hash(&first.config.plugins[0]),
+        remote_plugin_config_hash(&second.config.plugins[0]),
+    );
+    assert_eq!(config_fingerprint(&first.config), config_fingerprint(&second.config));
+}
