@@ -322,8 +322,8 @@ pub fn timestamp_now() -> String {
 
 /// Operation lock using fd-lock for cross-process mutual exclusion.
 ///
-/// Uses `flock(LOCK_EX)` under the hood. The lock is released when the
-/// guard is dropped (which closes the file descriptor).
+/// Uses `flock(LOCK_EX)` under the hood. Dropping the guard explicitly
+/// unlocks before closing the file descriptor.
 pub struct OperationLock;
 
 impl OperationLock {
@@ -380,6 +380,22 @@ pub struct OperationLockGuard {
     _lock: fd_lock::RwLock<fs::File>,
 }
 
+impl Drop for OperationLockGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        loop {
+            match self._lock.try_write() {
+                Ok(guard) => {
+                    drop(guard);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Error, ErrorKind, Result};
@@ -397,6 +413,28 @@ mod tests {
     fn try_write_result_preserves_real_errors() {
         let err = super::map_try_write_result::<()>(Err(Error::other("boom"))).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::Other);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn operation_lock_drop_unlocks_an_inherited_file_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("operations.lock");
+        let file = super::OperationLock::open_lock_file(&lock_path).unwrap();
+        let mut lock = fd_lock::RwLock::new(file);
+        let write_guard = lock.write().unwrap();
+        let inherited_file = write_guard.try_clone().unwrap();
+        std::mem::forget(write_guard);
+        let guard = super::OperationLockGuard { _lock: lock };
+
+        drop(guard);
+
+        let reacquired = super::OperationLock::try_acquire(&lock_path).unwrap();
+        assert!(
+            reacquired.is_some(),
+            "dropping the operation guard must explicitly unlock descriptors inherited across a concurrent fork"
+        );
+        drop(inherited_file);
     }
 
     #[test]

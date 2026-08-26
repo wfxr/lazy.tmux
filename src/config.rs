@@ -16,6 +16,7 @@ pub(crate) enum Condition {
 pub(crate) struct PluginDeclaration {
     pub(crate) spec: PluginSpec,
     pub(crate) enabled: Condition,
+    pub(crate) load_condition: Condition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +87,7 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
     validate_plugin_properties(node, &raw, warnings)?;
 
     let enabled = parse_condition(node, &raw, "enabled")?.unwrap_or(Condition::Bool(true));
+    let load_condition = parse_condition(node, &raw, "cond")?.unwrap_or(Condition::Bool(true));
 
     let is_local = get_bool(node, &raw, "local")?.unwrap_or(false);
 
@@ -153,6 +155,11 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
                         "plugin \"{raw}\": enabled child form is reserved; use enabled=#true, enabled=#false, or enabled=\"shell predicate\""
                     );
                 }
+                "cond" => {
+                    bail!(
+                        "plugin \"{raw}\": cond child form is reserved; use cond=#true, cond=#false, or cond=\"shell predicate\""
+                    );
+                }
                 unknown => {
                     warnings.push(format!("plugin \"{raw}\": ignoring unknown child \"{unknown}\""))
                 }
@@ -194,7 +201,7 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
         PluginSpec::from_remote(raw, explicit_name, opt_prefix, tracking, build, opts)?
     };
 
-    Ok(PluginDeclaration { spec: source, enabled })
+    Ok(PluginDeclaration { spec: source, enabled, load_condition })
 }
 
 pub(crate) fn validate_unique_ids<'a>(
@@ -217,7 +224,7 @@ fn validate_plugin_properties(
     warnings: &mut Vec<String>,
 ) -> Result<()> {
     const KNOWN_PROPERTIES: &[&str] =
-        &["local", "name", "opt-prefix", "branch", "tag", "commit", "build", "enabled"];
+        &["local", "name", "opt-prefix", "branch", "tag", "commit", "build", "enabled", "cond"];
 
     for (positional_index, _) in
         node.entries().iter().filter(|entry| entry.name().is_none()).enumerate().skip(1)

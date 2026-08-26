@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use tmup::config_mode::{self, ConfigMode, TpmConfigPolicy};
+use tmup::config_mode::{self, ConfigMode, ResolutionIntent, TpmConfigPolicy};
 use tmup::lockfile::{self, LockFile};
 use tmup::progress::{NullReporter, OperationStage, ProgressEvent, ProgressReporter};
 use tmup::state::{OperationLock, Paths};
@@ -225,7 +225,12 @@ fn resolve_normal_invocation(
         ConfigMode::Pure => TpmConfigPolicy::Disabled,
         ConfigMode::Mixed => TpmConfigPolicy::Discover,
     };
-    let request = config_mode::LoadRequest::from_command(config_mode, false, tpm_policy);
+    let request = config_mode::LoadRequest::from_command(
+        config_mode,
+        false,
+        tpm_policy,
+        ResolutionIntent::LoadEligibility,
+    );
     let loaded = config_mode::load_with_request(&paths, request)?;
     let context = InvocationContext::new(
         config_mode,
@@ -289,20 +294,29 @@ async fn run_loaded_with_adapter(
 
 struct LoadedContext {
     paths: Paths,
-    config: tmup::model::Config,
+    config: config_mode::ResolvedConfig,
     warnings: Vec<String>,
 }
 
 fn load_context(context: &InvocationContext) -> Result<LoadedContext> {
-    let paths = Paths::from_runtime_roots(
+    let paths = context_paths(context)?;
+    let tpm_policy = context.tpm_identity.policy();
+    let request = config_mode::LoadRequest::from_command(
+        context.config_mode,
+        false,
+        tpm_policy,
+        ResolutionIntent::LoadEligibility,
+    );
+    let loaded = config_mode::load_with_request(&paths, request)?;
+    Ok(LoadedContext { paths: loaded.paths, config: loaded.config, warnings: loaded.warnings })
+}
+
+fn context_paths(context: &InvocationContext) -> Result<Paths> {
+    Paths::from_runtime_roots(
         context.data_root.clone(),
         context.state_root.clone(),
         context.config_path.clone(),
-    )?;
-    let tpm_policy = context.tpm_identity.policy();
-    let request = config_mode::LoadRequest::from_command(context.config_mode, false, tpm_policy);
-    let loaded = config_mode::load_with_request(&paths, request)?;
-    Ok(LoadedContext { paths: loaded.paths, config: loaded.config, warnings: loaded.warnings })
+    )
 }
 
 fn load_lockfile(paths: &Paths) -> Result<LockFile> {
@@ -337,32 +351,36 @@ async fn execute_inline(
     lock_wait_message: LockWaitMessage,
     tmux: &mut impl TmuxAdapter,
 ) -> Result<Outcome> {
-    let loaded = load_context(context)?;
-    emit_warnings(preview_warnings, &loaded.warnings);
-    let _guard = match OperationLock::try_acquire(&loaded.paths.lock_path)? {
+    let paths = context_paths(context)?;
+    let guard = match OperationLock::try_acquire(&paths.lock_path)? {
         Some(guard) => guard,
         None => {
             if matches!(lock_wait_message, LockWaitMessage::Announce) {
                 tmux.display_waiting();
             }
-            OperationLock::acquire(&loaded.paths.lock_path)?
+            OperationLock::acquire(&paths.lock_path)?
         }
     };
-    execute_core(&loaded, tmux, &NullReporter).await
+    let loaded = load_context(context)?;
+    emit_warnings(preview_warnings, &loaded.warnings);
+    let outcome = execute_core(&loaded, tmux, &NullReporter).await;
+    drop(guard);
+    outcome
 }
 
 async fn execute_hosted(
     context: &InvocationContext,
     tmux: &mut impl TmuxAdapter,
 ) -> Result<Outcome> {
-    let loaded = load_context(context)?;
-    emit_warnings(&[], &loaded.warnings);
-    let reporter = progress::create_reporter(&loaded.paths, "init", &loaded.config, None);
+    let preview = load_context(context)?;
+    let reporter = progress::create_reporter(&preview.paths, "init", &preview.config, None);
     reporter.report(ProgressEvent::OperationStart { command: "init" });
     reporter.report(ProgressEvent::OperationStage { stage: OperationStage::WaitingForLock });
 
     let result = {
-        let _guard = OperationLock::acquire(&loaded.paths.lock_path)?;
+        let _guard = OperationLock::acquire(&preview.paths.lock_path)?;
+        let loaded = load_context(context)?;
+        emit_warnings(&preview.warnings, &loaded.warnings);
         execute_core(&loaded, tmux, &*reporter).await
     };
     match result {
@@ -804,7 +822,11 @@ async fn execute_core(
     .await?;
 
     reporter.report(ProgressEvent::OperationStage { stage: OperationStage::LoadingTmux });
-    let load_plan = loader::build_load_plan(&loaded.config, &loaded.paths.plugin_root);
+    let load_eligibility = loaded
+        .config
+        .load_eligibility()
+        .context("Init Session configuration did not resolve Load Eligibility")?;
+    let load_plan = loader::build_load_plan(load_eligibility, &loaded.paths.plugin_root);
     tmux.execute_load_plan(&load_plan)?;
 
     if sync_outcome.is_clean() {
@@ -1196,6 +1218,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn false_load_condition_skips_plugin_options_and_scripts_but_preserves_neighbors() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        let skipped_dir = dir.path().join("skipped-plugin");
+        let loaded_dir = dir.path().join("loaded-plugin");
+        std::fs::create_dir_all(&skipped_dir).unwrap();
+        std::fs::create_dir_all(&loaded_dir).unwrap();
+        let skipped_script = skipped_dir.join("skipped.tmux");
+        let loaded_script = loaded_dir.join("loaded.tmux");
+        std::fs::write(&skipped_script, "#!/bin/sh\n").unwrap();
+        std::fs::write(&loaded_script, "#!/bin/sh\n").unwrap();
+        write_config(
+            &context,
+            &format!(
+                concat!(
+                    "plugin \"{}\" local=#true cond=#false {{ opt \"skipped\" \"yes\" }}\n",
+                    "plugin \"{}\" local=#true {{ opt \"loaded\" \"yes\" }}\n",
+                ),
+                skipped_dir.display(),
+                loaded_dir.display(),
+            ),
+        );
+        let mut tmux = MockTmux::hosted();
+
+        let outcome = run_with_adapter(context, &mut tmux).await.unwrap();
+
+        assert_eq!(outcome, Outcome::Completed);
+        let Request::Load(plan) = tmux.requests.last().unwrap() else {
+            panic!("init must execute its tmux load plan");
+        };
+        assert!(
+            !plan.contains(&TmuxCommand::SetOption { key: "skipped".into(), value: "yes".into() })
+        );
+        assert!(!plan.contains(&TmuxCommand::RunShell { script: skipped_script }));
+        assert!(
+            plan.contains(&TmuxCommand::SetOption { key: "loaded".into(), value: "yes".into() })
+        );
+        assert!(plan.contains(&TmuxCommand::RunShell { script: loaded_script }));
+    }
+
+    #[tokio::test]
     async fn init_preview_is_advisory_and_execution_uses_one_frozen_snapshot() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
@@ -1233,6 +1296,59 @@ mod tests {
         assert!(
             plan.iter().all(|command| matches!(command, TmuxCommand::SetEnvironment { .. })),
             "the same authoritative false snapshot must drive loading: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn authoritative_condition_snapshot_is_resolved_after_acquiring_the_operation_lock() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        let plugin_dir = dir.path().join("local-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let plugin_script = plugin_dir.join("load.tmux");
+        std::fs::write(&plugin_script, "#!/bin/sh\n").unwrap();
+        write_config(
+            &context,
+            &format!(
+                r#"plugin "{}" local=#true cond="n=$(cat evaluations 2>/dev/null || printf 0); n=$((n+1)); printf %s $n > evaluations; test $n -ne 2""#,
+                plugin_dir.display()
+            ),
+        );
+        let lock_path = context.state_root.join("operations.lock");
+        let held_lock = OperationLock::acquire(&lock_path).unwrap();
+        let evaluation_path = context.config_path.parent().unwrap().join("evaluations");
+        let thread_context = context.clone();
+        let handle = std::thread::spawn(move || {
+            let runtime =
+                tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let mut tmux = MockTmux::hosted();
+            let outcome = runtime.block_on(run_with_adapter(thread_context, &mut tmux));
+            (outcome, tmux)
+        });
+
+        for _ in 0..100 {
+            if evaluation_path.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(
+            std::fs::read_to_string(&evaluation_path).unwrap(),
+            "1",
+            "the final condition snapshot must wait for the operation lock"
+        );
+
+        drop(held_lock);
+        let (outcome, tmux) = handle.join().unwrap();
+        assert_eq!(outcome.unwrap(), Outcome::Completed);
+        assert_eq!(std::fs::read_to_string(evaluation_path).unwrap(), "2");
+        let [Request::Waiting, Request::Load(plan)] = tmux.requests.as_slice() else {
+            panic!("inline execution must wait, then load from the authoritative snapshot");
+        };
+        assert!(
+            !plan.contains(&TmuxCommand::RunShell { script: plugin_script }),
+            "the authoritative false result must drive the loader"
         );
     }
 
@@ -1549,7 +1665,7 @@ mod tests {
             &context,
             &format!(
                 concat!(
-                    "plugin \"http://127.0.0.1:1/test/plugin.git\"\n",
+                    "plugin \"http://127.0.0.1:1/test/plugin.git\" cond=#false\n",
                     "plugin \"{}\" local=#true\n",
                 ),
                 usable_plugin.display(),

@@ -51,6 +51,7 @@ fn list_uses_human_readable_default_columns() {
         .stdout(predicate::str::contains("Kind"))
         .stdout(predicate::str::contains("State"))
         .stdout(predicate::str::contains("Build"))
+        .stdout(predicate::str::contains("Load"))
         .stdout(predicate::str::contains("Lock"))
         .stdout(predicate::str::contains("user/repo"))
         .stdout(predicate::str::contains("Current").not())
@@ -79,6 +80,7 @@ fn list_verbose_shows_diagnostic_columns() {
         .stdout(predicate::str::contains("Name"))
         .stdout(predicate::str::contains("Current"))
         .stdout(predicate::str::contains("Expected"))
+        .stdout(predicate::str::contains("Load"))
         .stdout(predicate::str::contains("Source"))
         .stdout(predicate::str::contains("github.com/user/repo"))
         .stdout(predicate::str::contains("repo-name"))
@@ -317,4 +319,39 @@ fn list_emits_unknown_plugin_parameter_warnings_without_failing() {
         .stderr(predicate::str::contains("future-property"))
         .stderr(predicate::str::contains("future-child"))
         .stderr(predicate::str::contains("positional"));
+}
+
+#[test]
+fn list_reports_future_load_eligibility_independently_from_managed_state() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("config/tmux");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_path = config_dir.join("tmup.kdl");
+    std::fs::write(
+        &config_path,
+        r#"
+plugin "user/loadable" cond=#true
+plugin "user/skipped" cond="echo predicate-stdout; echo predicate-stderr >&2; exit 17"
+"#,
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("tmup")
+        .unwrap()
+        .arg("list")
+        .env("TMUP_CONFIG", &config_path)
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("XDG_STATE_HOME", dir.path().join("state"))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "stderr:\n{}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let loadable = stdout.lines().find(|line| line.contains("user/loadable")).unwrap();
+    let skipped = stdout.lines().find(|line| line.contains("user/skipped")).unwrap();
+    assert!(loadable.contains("missing") && loadable.contains("yes"), "{loadable}");
+    assert!(skipped.contains("missing") && skipped.contains("no"), "{skipped}");
+    assert!(!stdout.contains("predicate-stdout"));
+    assert!(!stderr.contains("predicate-stderr"));
 }
