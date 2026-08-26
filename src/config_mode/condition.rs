@@ -1,0 +1,209 @@
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use anyhow::{Result, bail};
+
+use crate::config::{Condition, PluginDeclaration};
+use crate::model::PluginSpec;
+
+const CONDITION_TIMEOUT: Duration = Duration::from_secs(5);
+const CONDITION_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProcessOutcome {
+    Exited(i32),
+    Signaled,
+    TimedOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProcessFailure {
+    Spawn(String),
+    Monitor(String),
+}
+
+trait ConditionProcess {
+    fn run(
+        &self,
+        predicate: &str,
+        working_dir: &Path,
+        timeout: Duration,
+    ) -> std::result::Result<ProcessOutcome, ProcessFailure>;
+}
+
+struct ShellConditionRunner;
+
+impl ConditionProcess for ShellConditionRunner {
+    fn run(
+        &self,
+        predicate: &str,
+        working_dir: &Path,
+        timeout: Duration,
+    ) -> std::result::Result<ProcessOutcome, ProcessFailure> {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", predicate])
+            .current_dir(working_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| ProcessFailure::Spawn(error.to_string()))?;
+        let started = Instant::now();
+
+        loop {
+            let status =
+                child.try_wait().map_err(|error| ProcessFailure::Monitor(error.to_string()))?;
+            if let Some(status) = status {
+                return Ok(outcome_from_status(status));
+            }
+            if started.elapsed() >= timeout {
+                if let Some(status) =
+                    child.try_wait().map_err(|error| ProcessFailure::Monitor(error.to_string()))?
+                {
+                    return Ok(outcome_from_status(status));
+                }
+                child.kill().map_err(|error| ProcessFailure::Monitor(error.to_string()))?;
+                child.wait().map_err(|error| ProcessFailure::Monitor(error.to_string()))?;
+                return Ok(ProcessOutcome::TimedOut);
+            }
+            std::thread::sleep(CONDITION_POLL_INTERVAL);
+        }
+    }
+}
+
+fn outcome_from_status(status: std::process::ExitStatus) -> ProcessOutcome {
+    match status.code() {
+        Some(code) => ProcessOutcome::Exited(code),
+        None => ProcessOutcome::Signaled,
+    }
+}
+
+pub(super) fn project_enabled_plugins(
+    declarations: Vec<PluginDeclaration>,
+    working_dir: &Path,
+) -> Result<Vec<PluginSpec>> {
+    project_enabled_plugins_with_runner(declarations, working_dir, &ShellConditionRunner)
+}
+
+fn project_enabled_plugins_with_runner(
+    declarations: Vec<PluginDeclaration>,
+    working_dir: &Path,
+    process: &impl ConditionProcess,
+) -> Result<Vec<PluginSpec>> {
+    let mut plugins = Vec::with_capacity(declarations.len());
+    for declaration in declarations {
+        if evaluate_enable_condition(&declaration, working_dir, process)? {
+            plugins.push(declaration.spec);
+        }
+    }
+    Ok(plugins)
+}
+
+fn evaluate_enable_condition(
+    declaration: &PluginDeclaration,
+    working_dir: &Path,
+    process: &impl ConditionProcess,
+) -> Result<bool> {
+    let Condition::Shell(predicate) = &declaration.enabled else {
+        return Ok(matches!(declaration.enabled, Condition::Bool(true)));
+    };
+    let plugin = declaration.spec.remote_id().unwrap_or(&declaration.spec.name);
+    match process.run(predicate, working_dir, CONDITION_TIMEOUT) {
+        Ok(ProcessOutcome::Exited(0)) => Ok(true),
+        Ok(ProcessOutcome::Exited(_)) => Ok(false),
+        Ok(ProcessOutcome::Signaled) => {
+            bail!("plugin \"{plugin}\": enabled shell predicate terminated by a signal")
+        }
+        Ok(ProcessOutcome::TimedOut) => {
+            bail!("plugin \"{plugin}\": enabled shell predicate timed out after 5 seconds")
+        }
+        Err(ProcessFailure::Spawn(error)) => {
+            bail!("plugin \"{plugin}\": failed to start /bin/sh for enabled predicate: {error}")
+        }
+        Err(ProcessFailure::Monitor(error)) => {
+            bail!("plugin \"{plugin}\": failed while running enabled predicate: {error}")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    use super::*;
+
+    struct FakeProcess {
+        outcomes: RefCell<VecDeque<std::result::Result<ProcessOutcome, ProcessFailure>>>,
+        calls: RefCell<Vec<String>>,
+    }
+
+    impl FakeProcess {
+        fn new(
+            outcomes: impl IntoIterator<Item = std::result::Result<ProcessOutcome, ProcessFailure>>,
+        ) -> Self {
+            Self {
+                outcomes: RefCell::new(outcomes.into_iter().collect()),
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ConditionProcess for FakeProcess {
+        fn run(
+            &self,
+            predicate: &str,
+            _working_dir: &Path,
+            _timeout: Duration,
+        ) -> std::result::Result<ProcessOutcome, ProcessFailure> {
+            self.calls.borrow_mut().push(predicate.to_string());
+            self.outcomes.borrow_mut().pop_front().expect("unexpected condition execution")
+        }
+    }
+
+    #[test]
+    fn projects_shell_conditions_once_in_declaration_order() {
+        let parsed = crate::config::parse_config_document(
+            r#"
+plugin "user/first" enabled="first"
+plugin "user/second" enabled=#true
+plugin "user/third" enabled="third"
+"#,
+        )
+        .unwrap();
+        let process =
+            FakeProcess::new([Ok(ProcessOutcome::Exited(0)), Ok(ProcessOutcome::Exited(9))]);
+
+        let plugins =
+            project_enabled_plugins_with_runner(parsed.plugins, Path::new("/config"), &process)
+                .unwrap();
+
+        let names: Vec<_> = plugins.iter().map(|plugin| plugin.name.as_str()).collect();
+        assert_eq!(names, ["first", "second"]);
+        assert_eq!(process.calls.into_inner(), ["first", "third"]);
+    }
+
+    #[test]
+    fn process_failures_are_hard_errors() {
+        let cases = [
+            (Ok(ProcessOutcome::Signaled), "terminated by a signal"),
+            (Ok(ProcessOutcome::TimedOut), "timed out after 5 seconds"),
+            (Err(ProcessFailure::Spawn("missing shell".into())), "failed to start /bin/sh"),
+            (Err(ProcessFailure::Monitor("wait failed".into())), "failed while running"),
+        ];
+
+        for (outcome, expected) in cases {
+            let parsed =
+                crate::config::parse_config_document(r#"plugin "user/repo" enabled="predicate""#)
+                    .unwrap();
+            let process = FakeProcess::new([outcome]);
+
+            let error =
+                project_enabled_plugins_with_runner(parsed.plugins, Path::new("/config"), &process)
+                    .unwrap_err();
+
+            assert!(error.to_string().contains(expected), "{error:#}");
+        }
+    }
+}

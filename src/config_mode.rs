@@ -4,9 +4,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::ValueEnum;
 
+use crate::config::{Condition, ParsedConfig, PluginDeclaration};
 use crate::model::Config;
 use crate::state::Paths;
 use crate::{config, config_tpm};
+
+mod condition;
 
 /// Supported configuration loading modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -116,12 +119,7 @@ pub fn load_from_sources(
     match mode {
         ConfigMode::Pure => {
             let path = tmup_path.context("tmup config file not found")?;
-            Ok(LoadedConfig {
-                config: load_tmup_config(path)?,
-                warnings: Vec::new(),
-                active_config_path: path.to_path_buf(),
-                tpm_config_path: None,
-            })
+            resolve_loaded_config(load_tmup_config(path)?, path, None)
         }
         ConfigMode::Mixed => load_mixed(tmup_path, tpm_path),
     }
@@ -132,11 +130,9 @@ pub fn load_with_request(paths: &Paths, request: LoadRequest) -> Result<LoadedRe
     let tmup_path = prepare_tmup_config_path(paths, request.tmup_policy)?;
     let (loaded, tpm_policy): (LoadedConfig, TpmConfigPolicy) = match request.mode {
         ConfigMode::Pure => (
-            LoadedConfig {
-                config: load_tmup_config_for_policy(&tmup_path, request.tmup_policy)?,
-                warnings: Vec::new(),
-                active_config_path: tmup_path,
-                tpm_config_path: None,
+            {
+                let parsed = load_tmup_config_for_policy(&tmup_path, request.tmup_policy)?;
+                resolve_loaded_config(parsed, &tmup_path, None)?
             },
             TpmConfigPolicy::Disabled,
         ),
@@ -164,27 +160,33 @@ pub fn load_with_request(paths: &Paths, request: LoadRequest) -> Result<LoadedRe
 
 fn load_mixed(tmup_path: Option<&Path>, tpm_path: Option<&Path>) -> Result<LoadedConfig> {
     let tmup_path = tmup_path.context("tmup config file not found")?;
-    let mut warnings = Vec::new();
     let tpm_config = tpm_path.map(config_tpm::load_config_from_path).transpose()?;
     let tmup_config = load_tmup_config_or_default(tmup_path)?;
 
-    match tpm_config {
-        Some(tpm) => {
-            let config = merge_configs(tmup_config, tpm, &mut warnings);
-            Ok(LoadedConfig {
-                config,
-                warnings,
-                active_config_path: tmup_path.to_path_buf(),
-                tpm_config_path: tpm_path.map(Path::to_path_buf),
-            })
-        }
-        None => Ok(LoadedConfig {
-            config: tmup_config,
-            warnings,
-            active_config_path: tmup_path.to_path_buf(),
-            tpm_config_path: None,
-        }),
-    }
+    let parsed = match tpm_config {
+        Some(tpm) => merge_configs(tmup_config, tpm),
+        None => tmup_config,
+    };
+    resolve_loaded_config(parsed, tmup_path, tpm_path.map(Path::to_path_buf))
+}
+
+fn resolve_loaded_config(
+    parsed: ParsedConfig,
+    active_config_path: &Path,
+    tpm_config_path: Option<PathBuf>,
+) -> Result<LoadedConfig> {
+    let working_dir = active_config_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let ParsedConfig { options, plugins, warnings } = parsed;
+    let plugins = condition::project_enabled_plugins(plugins, working_dir)?;
+    Ok(LoadedConfig {
+        config: Config { options, plugins },
+        warnings,
+        active_config_path: active_config_path.to_path_buf(),
+        tpm_config_path,
+    })
 }
 
 fn resolve_tpm_config_path(policy: TpmConfigPolicy) -> Result<(Option<PathBuf>, Vec<String>)> {
@@ -198,32 +200,32 @@ fn resolve_tpm_config_path(policy: TpmConfigPolicy) -> Result<(Option<PathBuf>, 
     }
 }
 
-fn load_tmup_config(path: &Path) -> Result<Config> {
+fn load_tmup_config(path: &Path) -> Result<ParsedConfig> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read tmup config: {}", path.display()))?;
-    config::parse_config(&content)
+    config::parse_config_document(&content)
 }
 
-fn load_tmup_config_or_default(path: &Path) -> Result<Config> {
+fn load_tmup_config_or_default(path: &Path) -> Result<ParsedConfig> {
     if path.exists() { load_tmup_config(path) } else { default_tmup_config() }
 }
 
-fn load_tmup_config_for_policy(path: &Path, policy: TmupConfigPolicy) -> Result<Config> {
+fn load_tmup_config_for_policy(path: &Path, policy: TmupConfigPolicy) -> Result<ParsedConfig> {
     match policy {
         TmupConfigPolicy::ReadOnly => load_tmup_config_or_default(path),
         TmupConfigPolicy::CreateIfMissing => load_tmup_config(path),
     }
 }
 
-fn merge_configs(mut kdl: Config, tpm: Config, warnings: &mut Vec<String>) -> Config {
+fn merge_configs(mut kdl: ParsedConfig, tpm: Config) -> ParsedConfig {
     // Mixed mode preserves TPM-discovered order for TPM entries, while KDL-only
     // entries are appended afterward in their original KDL order. Conflicting
     // remote ids keep the TPM slot but use the KDL declaration.
     let mut merged = Vec::with_capacity(tpm.plugins.len() + kdl.plugins.len());
     let mut kdl_remote_indices = std::collections::HashMap::new();
 
-    for (index, plugin) in kdl.plugins.iter().enumerate() {
-        if let Some(id) = plugin.remote_id() {
+    for (index, declaration) in kdl.plugins.iter().enumerate() {
+        if let Some(id) = declaration.spec.remote_id() {
             kdl_remote_indices.insert(id.to_string(), index);
         }
     }
@@ -239,11 +241,11 @@ fn merge_configs(mut kdl: Config, tpm: Config, warnings: &mut Vec<String>) -> Co
         if let Some(&index) = kdl_remote_indices.get(id) {
             merged.push(kdl.plugins[index].clone());
             consumed_kdl[index] = true;
-            warnings.push(format!(
+            kdl.warnings.push(format!(
                 "plugin \"{id}\" declared in both tmup.kdl and TPM config; using tmup.kdl entry"
             ));
         } else {
-            merged.push(plugin);
+            merged.push(PluginDeclaration { spec: plugin, enabled: Condition::Bool(true) });
         }
     }
 
@@ -253,9 +255,8 @@ fn merge_configs(mut kdl: Config, tpm: Config, warnings: &mut Vec<String>) -> Co
         }
     }
 
-    let config = Config { options: kdl.options, plugins: merged };
-    debug_assert!(config::validate_unique_ids(&config.plugins).is_ok());
-    config
+    debug_assert!(config::validate_unique_ids(merged.iter().map(|entry| &entry.spec)).is_ok());
+    ParsedConfig { options: kdl.options, plugins: merged, warnings: kdl.warnings }
 }
 
 fn prepare_tmup_config_path(paths: &Paths, policy: TmupConfigPolicy) -> Result<PathBuf> {
@@ -302,8 +303,8 @@ options {
 "#
 }
 
-fn default_tmup_config() -> Result<Config> {
-    config::parse_config(default_tmup_config_template())
+fn default_tmup_config() -> Result<ParsedConfig> {
+    config::parse_config_document(default_tmup_config_template())
         .context("internal default tmup config invalid")
 }
 

@@ -1,28 +1,55 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
-use kdl::KdlDocument;
+use kdl::{KdlDocument, KdlEntry};
 
 use crate::model::{Config, Options, PluginSource, PluginSpec, Tracking};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Condition {
+    Bool(bool),
+    Shell(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PluginDeclaration {
+    pub(crate) spec: PluginSpec,
+    pub(crate) enabled: Condition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedConfig {
+    pub(crate) options: Options,
+    pub(crate) plugins: Vec<PluginDeclaration>,
+    pub(crate) warnings: Vec<String>,
+}
+
 /// Parse a KDL-formatted configuration string into a [`Config`].
 pub fn parse_config(input: &str) -> Result<Config> {
+    let parsed = parse_config_document(input)?;
+    Ok(Config {
+        options: parsed.options,
+        plugins: parsed.plugins.into_iter().map(|declaration| declaration.spec).collect(),
+    })
+}
+
+pub(crate) fn parse_config_document(input: &str) -> Result<ParsedConfig> {
     let doc: KdlDocument = input.parse().context("failed to parse KDL")?;
 
     let options = parse_options(&doc)?;
     let mut plugins = Vec::new();
+    let mut warnings = Vec::new();
 
     for node in doc.nodes() {
         if node.name().value() == "plugin" {
-            let spec = parse_plugin(node)?;
-            plugins.push(spec);
+            plugins.push(parse_plugin(node, &mut warnings)?);
         }
     }
 
-    validate_unique_ids(&plugins)?;
+    validate_unique_ids(plugins.iter().map(|declaration| &declaration.spec))?;
 
-    Ok(Config { options, plugins })
+    Ok(ParsedConfig { options, plugins, warnings })
 }
 
 fn parse_options(doc: &KdlDocument) -> Result<Options> {
@@ -49,12 +76,16 @@ fn parse_options(doc: &KdlDocument) -> Result<Options> {
     Ok(opts)
 }
 
-fn parse_plugin(node: &kdl::KdlNode) -> Result<PluginSpec> {
+fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<PluginDeclaration> {
     let raw = node
         .get(0)
         .and_then(|v| v.as_string())
         .context("plugin requires a source string as first argument")?
         .to_string();
+
+    validate_plugin_properties(node, &raw, warnings)?;
+
+    let enabled = parse_condition(node, &raw, "enabled")?.unwrap_or(Condition::Bool(true));
 
     let is_local = get_bool(node, &raw, "local")?.unwrap_or(false);
 
@@ -105,6 +136,10 @@ fn parse_plugin(node: &kdl::KdlNode) -> Result<PluginSpec> {
                     opts.push((key, value));
                 }
                 "build" => {
+                    ensure!(
+                        child_build.is_none(),
+                        "plugin \"{raw}\": build child node may only be specified once"
+                    );
                     child_build = Some(
                         child
                             .get(0)
@@ -113,7 +148,14 @@ fn parse_plugin(node: &kdl::KdlNode) -> Result<PluginSpec> {
                             .to_string(),
                     );
                 }
-                _ => {}
+                "enabled" => {
+                    bail!(
+                        "plugin \"{raw}\": enabled child form is reserved; use enabled=#true, enabled=#false, or enabled=\"shell predicate\""
+                    );
+                }
+                unknown => {
+                    warnings.push(format!("plugin \"{raw}\": ignoring unknown child \"{unknown}\""))
+                }
             }
         }
     }
@@ -152,10 +194,12 @@ fn parse_plugin(node: &kdl::KdlNode) -> Result<PluginSpec> {
         PluginSpec::from_remote(raw, explicit_name, opt_prefix, tracking, build, opts)?
     };
 
-    Ok(source)
+    Ok(PluginDeclaration { spec: source, enabled })
 }
 
-pub(crate) fn validate_unique_ids(plugins: &[PluginSpec]) -> Result<()> {
+pub(crate) fn validate_unique_ids<'a>(
+    plugins: impl IntoIterator<Item = &'a PluginSpec>,
+) -> Result<()> {
     let mut seen = HashSet::new();
     for p in plugins {
         if let Some(id) = p.remote_id()
@@ -165,6 +209,60 @@ pub(crate) fn validate_unique_ids(plugins: &[PluginSpec]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn validate_plugin_properties(
+    node: &kdl::KdlNode,
+    plugin: &str,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    const KNOWN_PROPERTIES: &[&str] =
+        &["local", "name", "opt-prefix", "branch", "tag", "commit", "build", "enabled"];
+
+    for (positional_index, _) in
+        node.entries().iter().filter(|entry| entry.name().is_none()).enumerate().skip(1)
+    {
+        warnings.push(format!(
+            "plugin \"{plugin}\": ignoring extra positional parameter at index {positional_index}"
+        ));
+    }
+
+    let mut property_counts: HashMap<&str, usize> = HashMap::new();
+    for name in node.entries().iter().filter_map(|entry| entry.name().map(|name| name.value())) {
+        if KNOWN_PROPERTIES.contains(&name) {
+            let count = property_counts.entry(name).or_default();
+            *count += 1;
+            ensure!(*count == 1, "plugin \"{plugin}\": {name} may only be specified once");
+        } else {
+            warnings.push(format!("plugin \"{plugin}\": ignoring unknown property \"{name}\""));
+        }
+    }
+    Ok(())
+}
+
+fn parse_condition(node: &kdl::KdlNode, plugin: &str, key: &str) -> Result<Option<Condition>> {
+    let Some(entry) = property_entry(node, key) else {
+        return Ok(None);
+    };
+    ensure!(
+        entry.ty().is_none(),
+        "plugin \"{plugin}\": {key} does not support KDL type annotations"
+    );
+    if let Some(value) = entry.value().as_bool() {
+        return Ok(Some(Condition::Bool(value)));
+    }
+    if let Some(value) = entry.value().as_string() {
+        ensure!(
+            !value.trim().is_empty(),
+            "plugin \"{plugin}\": {key} shell predicate must not be empty or whitespace-only"
+        );
+        return Ok(Some(Condition::Shell(value.to_string())));
+    }
+    bail!("plugin \"{plugin}\": {key} must be a bool or shell predicate string")
+}
+
+fn property_entry<'a>(node: &'a kdl::KdlNode, key: &str) -> Option<&'a KdlEntry> {
+    node.entries().iter().find(|entry| entry.name().is_some_and(|name| name.value() == key))
 }
 
 /// Extract an optional string property, erroring if the property exists but is not a string.

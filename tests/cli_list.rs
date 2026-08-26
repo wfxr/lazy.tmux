@@ -255,3 +255,66 @@ fn list_mixed_preserves_tpm_branch_suffix_in_source_display() {
         .success()
         .stdout(predicate::str::contains("tmux-plugins/tmux-resurrect#feature"));
 }
+
+#[test]
+fn list_uses_effective_plugin_specification_and_keeps_false_predicates_quiet() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("config/tmux");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let local = dir.path().join("local-disabled");
+    let config_path = config_dir.join("tmup.kdl");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+plugin "user/enabled" enabled="test \"$TMUP_TEST_HOST\" = workstation"
+plugin "user/disabled" enabled="echo predicate-stdout; echo predicate-stderr >&2; exit 23"
+plugin "{}" local=#true enabled=#false
+"#,
+            local.display(),
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("tmup")
+        .unwrap()
+        .arg("list")
+        .env("TMUP_CONFIG", &config_path)
+        .env("TMUP_TEST_HOST", "workstation")
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("XDG_STATE_HOME", dir.path().join("state"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("user/enabled"))
+        .stdout(predicate::str::contains("user/disabled").not())
+        .stdout(predicate::str::contains("local-disabled").not())
+        .stdout(predicate::str::contains("predicate-stdout").not())
+        .stderr(predicate::str::contains("predicate-stderr").not());
+}
+
+#[test]
+fn list_emits_unknown_plugin_parameter_warnings_without_failing() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("config/tmux");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_path = config_dir.join("tmup.kdl");
+    std::fs::write(
+        &config_path,
+        r#"plugin "user/repo" "future" future-property=#true { future-child #true }"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("tmup")
+        .unwrap()
+        .arg("list")
+        .env("TMUP_CONFIG", &config_path)
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("XDG_STATE_HOME", dir.path().join("state"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("user/repo"))
+        .stderr(predicate::str::contains("warning:"))
+        .stderr(predicate::str::contains("future-property"))
+        .stderr(predicate::str::contains("future-child"))
+        .stderr(predicate::str::contains("positional"));
+}

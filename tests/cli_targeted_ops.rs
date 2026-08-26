@@ -1,5 +1,6 @@
 mod utils;
 use assert_cmd::Command;
+use predicates::prelude::*;
 use tempfile::tempdir;
 use utils::*;
 
@@ -95,4 +96,20 @@ fn restore_target_ignores_unrelated_sync_failures() {
     let lock = std::fs::read_to_string(dir.path().join("config/tmux/tmup.lock")).unwrap();
     assert!(lock.contains("example.com/test/plugin"));
     assert!(!lock.contains("example.com/bad/plugin"));
+}
+
+#[test]
+fn targeted_lifecycle_commands_reject_disabled_plugins_as_unknown() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config/tmux/tmup.kdl");
+    write_file(&config_path, r#"plugin "https://example.com/test/plugin.git" enabled=#false"#);
+    let gitconfig = write_git_rewrite_config(dir.path());
+
+    for command in ["sync", "install", "update", "restore"] {
+        cargo_cmd(dir.path(), &config_path, &gitconfig)
+            .args([command, "example.com/test/plugin"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("unknown plugin id"));
+    }
 }
