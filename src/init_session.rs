@@ -221,7 +221,6 @@ fn resolve_normal_invocation(
 ) -> Result<(InvocationContext, LoadedContext)> {
     let config_mode = invocation.config_mode;
     let paths = super::resolve_runtime_paths()?;
-    paths.ensure_dirs()?;
     let tpm_policy = match config_mode {
         ConfigMode::Pure => TpmConfigPolicy::Disabled,
         ConfigMode::Mixed => TpmConfigPolicy::Discover,
@@ -300,7 +299,6 @@ fn load_context(context: &InvocationContext) -> Result<LoadedContext> {
         context.state_root.clone(),
         context.config_path.clone(),
     )?;
-    paths.ensure_dirs()?;
     let tpm_policy = context.tpm_identity.policy();
     let request = config_mode::LoadRequest::from_command(context.config_mode, false, tpm_policy);
     let loaded = config_mode::load_with_request(&paths, request)?;
@@ -1165,6 +1163,76 @@ mod tests {
         assert!(
             !context.state_root.join("init-sessions").exists(),
             "the no-work fast path must not create continuation records"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_plugin_is_absent_from_init_managed_and_load_snapshots() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        let plugin_dir = dir.path().join("local-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let script = plugin_dir.join("disabled.tmux");
+        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+        write_config(
+            &context,
+            &format!(
+                r#"plugin "{}" local=#true enabled=#false {{ opt "disabled" "yes" }}"#,
+                plugin_dir.display()
+            ),
+        );
+        let mut tmux = MockTmux::hosted();
+
+        let outcome = run_with_adapter(context, &mut tmux).await.unwrap();
+
+        assert_eq!(outcome, Outcome::Completed);
+        let Request::Load(plan) = tmux.requests.last().unwrap() else {
+            panic!("init must execute its global tmux load plan");
+        };
+        assert!(
+            plan.iter().all(|command| matches!(command, TmuxCommand::SetEnvironment { .. })),
+            "disabled plugin options and scripts must be absent from init: {plan:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn init_preview_is_advisory_and_execution_uses_one_frozen_snapshot() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        write_config(
+            &context,
+            r#"plugin "user/repo" enabled="n=$(cat evaluations 2>/dev/null || printf 0); n=$((n+1)); printf %s $n > evaluations; test $n -ne 2""#,
+        );
+        let lock_path = context.config_path.parent().unwrap().join("tmup.lock");
+        let mut lock = LockFile::new();
+        lock.plugins.insert(
+            "github.com/user/repo".into(),
+            tmup::lockfile::LockEntry::default_branch("main", "abc1234"),
+        );
+        lockfile::write_lockfile_atomic(&lock_path, &lock).unwrap();
+        let mut tmux = MockTmux::hosted();
+        tmux.ui_available = false;
+
+        let outcome = run_with_adapter(context.clone(), &mut tmux).await.unwrap();
+
+        assert_eq!(outcome, Outcome::Completed);
+        assert_eq!(
+            std::fs::read_to_string(context.config_path.parent().unwrap().join("evaluations"))
+                .unwrap(),
+            "2",
+            "init may evaluate once for preview and once for authoritative execution only"
+        );
+        let lock = lockfile::read_lockfile(&lock_path).unwrap();
+        assert!(
+            lock.plugins.is_empty(),
+            "the authoritative false snapshot must drive managed-state reconciliation"
+        );
+        let Request::Load(plan) = tmux.requests.last().unwrap() else {
+            panic!("init must execute its tmux load plan");
+        };
+        assert!(
+            plan.iter().all(|command| matches!(command, TmuxCommand::SetEnvironment { .. })),
+            "the same authoritative false snapshot must drive loading: {plan:?}"
         );
     }
 

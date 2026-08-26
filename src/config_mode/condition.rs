@@ -1,5 +1,7 @@
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -41,14 +43,17 @@ impl ConditionProcess for ShellConditionRunner {
         working_dir: &Path,
         timeout: Duration,
     ) -> std::result::Result<ProcessOutcome, ProcessFailure> {
-        let mut child = Command::new("/bin/sh")
+        let mut command = Command::new("/bin/sh");
+        command
             .args(["-c", predicate])
             .current_dir(working_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| ProcessFailure::Spawn(error.to_string()))?;
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut child =
+            command.spawn().map_err(|error| ProcessFailure::Spawn(error.to_string()))?;
         let started = Instant::now();
 
         loop {
@@ -63,13 +68,36 @@ impl ConditionProcess for ShellConditionRunner {
                 {
                     return Ok(outcome_from_status(status));
                 }
-                child.kill().map_err(|error| ProcessFailure::Monitor(error.to_string()))?;
-                child.wait().map_err(|error| ProcessFailure::Monitor(error.to_string()))?;
+                terminate_condition_process(&mut child)?;
                 return Ok(ProcessOutcome::TimedOut);
             }
             std::thread::sleep(CONDITION_POLL_INTERVAL);
         }
     }
+}
+
+#[cfg(unix)]
+fn terminate_condition_process(child: &mut Child) -> std::result::Result<(), ProcessFailure> {
+    let process_group =
+        i32::try_from(child.id()).map_err(|error| ProcessFailure::Monitor(error.to_string()))?;
+    // SAFETY: `process_group` is the positive PID returned for the child that this module spawned
+    // as a process-group leader. Negating it targets that group and does not dereference memory.
+    let result = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+    if result == -1 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(ProcessFailure::Monitor(error.to_string()));
+        }
+    }
+    child.wait().map_err(|error| ProcessFailure::Monitor(error.to_string()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn terminate_condition_process(child: &mut Child) -> std::result::Result<(), ProcessFailure> {
+    child.kill().map_err(|error| ProcessFailure::Monitor(error.to_string()))?;
+    child.wait().map_err(|error| ProcessFailure::Monitor(error.to_string()))?;
+    Ok(())
 }
 
 fn outcome_from_status(status: std::process::ExitStatus) -> ProcessOutcome {

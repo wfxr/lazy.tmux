@@ -363,3 +363,18 @@ plugin "https://github.com/user/repo.git" enabled=#true
 
     assert!(error.to_string().contains("duplicate remote plugin id"), "{error:#}");
 }
+
+#[cfg(unix)]
+#[test]
+fn timed_out_predicate_cannot_leave_descendants_running() {
+    let dir = tempdir().unwrap();
+    let kdl = dir.path().join("tmup.kdl");
+    let marker = dir.path().join("descendant-survived");
+    write_file(&kdl, r#"plugin "user/repo" enabled="(sleep 6; touch descendant-survived) & wait""#);
+
+    let error = load_from_sources(ConfigMode::Pure, Some(&kdl), None).unwrap_err();
+    assert!(error.to_string().contains("timed out after 5 seconds"), "{error:#}");
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    assert!(!marker.exists(), "a timed-out predicate must terminate its whole process group");
+}
