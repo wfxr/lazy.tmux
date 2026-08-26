@@ -11,9 +11,11 @@ use tabled::settings::{Alignment, Modify, Style};
 use tmup::config_mode::{self, ConfigMode, TpmConfigPolicy};
 use tmup::planner::{BuildStatus, PluginState, PluginStatus};
 use tmup::progress::{self, NullReporter, OperationStage, ProgressEvent, ProgressReporter};
-use tmup::state::{OperationLock, OperationLockGuard, Paths};
+use tmup::state::{OperationLock, Paths};
 use tmup::sync::{self, SyncMode, SyncPolicy};
-use tmup::{loader, lockfile, plugin, termui, tmux};
+use tmup::{lockfile, plugin, termui};
+
+mod init_session;
 
 #[derive(Debug, Parser)]
 #[command(name = "tmup", about = "Modern tmux plugin manager", version)]
@@ -25,24 +27,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// tmux startup: install missing plugins, apply options, load plugins
-    Init {
-        #[arg(hide = true, long)]
-        bootstrap: bool,
-        #[arg(hide = true, long)]
-        ui_child: bool,
-        #[arg(hide = true, long)]
-        wait_channel: Option<String>,
-        #[arg(hide = true, long)]
-        config_path: Option<PathBuf>,
-        #[arg(hide = true, long)]
-        tpm_config_path: Option<PathBuf>,
-        #[arg(hide = true, long, conflicts_with = "tpm_config_path")]
-        no_tpm_config: bool,
-        #[arg(hide = true, long)]
-        data_root: Option<PathBuf>,
-        #[arg(hide = true, long)]
-        state_root: Option<PathBuf>,
-    },
+    Init(init_session::ProductionInitArgs),
     /// Install missing remote plugins
     Install {
         /// Plugin id to install (all if omitted)
@@ -73,47 +58,12 @@ enum Commands {
     },
 }
 
-struct InitInvocation {
-    bootstrap: bool,
-    ui_child: bool,
-    wait_channel: Option<String>,
-    config_path: Option<PathBuf>,
-    tpm_config_path: Option<PathBuf>,
-    no_tpm_config: bool,
-    data_root: Option<PathBuf>,
-    state_root: Option<PathBuf>,
-}
-
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match resolve_requested_config_mode() {
         Ok(requested_config_mode) => match cli.command {
-            Commands::Init {
-                bootstrap,
-                ui_child,
-                wait_channel,
-                config_path,
-                tpm_config_path,
-                no_tpm_config,
-                data_root,
-                state_root,
-            } => {
-                run_init(
-                    InitInvocation {
-                        bootstrap,
-                        ui_child,
-                        wait_channel,
-                        config_path,
-                        tpm_config_path,
-                        no_tpm_config,
-                        data_root,
-                        state_root,
-                    },
-                    requested_config_mode,
-                )
-                .await
-            }
+            Commands::Init(invocation) => invocation.execute(requested_config_mode).await,
             Commands::Install { id } => run_install(id, requested_config_mode).await,
             Commands::Sync { id } => run_sync(id, requested_config_mode).await,
             Commands::Update { id } => run_update(id, requested_config_mode).await,
@@ -184,7 +134,6 @@ struct AppliedConfig {
     paths: Paths,
     config: tmup::model::Config,
     warnings: Vec<String>,
-    tpm_config_policy: TpmConfigPolicy,
 }
 
 fn emit_config_warnings(warnings: &[String]) {
@@ -199,22 +148,10 @@ fn apply_config(paths: &Paths, mode: ConfigMode, create_missing: bool) -> Result
     Ok(applied)
 }
 
-fn init_tpm_config_policy(
-    mode: ConfigMode,
-    explicit_tpm_config_path: Option<PathBuf>,
-    no_tpm_config: bool,
-) -> TpmConfigPolicy {
+fn default_tpm_config_policy(mode: ConfigMode) -> TpmConfigPolicy {
     match mode {
         ConfigMode::Pure => TpmConfigPolicy::Disabled,
-        ConfigMode::Mixed => {
-            if no_tpm_config {
-                TpmConfigPolicy::Resolved(None)
-            } else if let Some(path) = explicit_tpm_config_path {
-                TpmConfigPolicy::Resolved(Some(path))
-            } else {
-                TpmConfigPolicy::Discover
-            }
-        }
+        ConfigMode::Mixed => TpmConfigPolicy::Discover,
     }
 }
 
@@ -227,15 +164,10 @@ fn apply_config_with_tpm_policy(
     let request = config_mode::LoadRequest::from_command(
         mode,
         create_missing,
-        explicit_tpm_policy.unwrap_or_else(|| init_tpm_config_policy(mode, None, false)),
+        explicit_tpm_policy.unwrap_or_else(|| default_tpm_config_policy(mode)),
     );
     let loaded = config_mode::load_with_request(paths, request)?;
-    Ok(AppliedConfig {
-        paths: loaded.paths,
-        config: loaded.config,
-        warnings: loaded.warnings,
-        tpm_config_policy: loaded.tpm_policy,
-    })
+    Ok(AppliedConfig { paths: loaded.paths, config: loaded.config, warnings: loaded.warnings })
 }
 
 fn load_lockfile(paths: &Paths) -> Result<lockfile::LockFile> {
@@ -244,323 +176,6 @@ fn load_lockfile(paths: &Paths) -> Result<lockfile::LockFile> {
     } else {
         Ok(lockfile::LockFile::new())
     }
-}
-
-// ---------------------------------------------------------------------------
-// Init
-// ---------------------------------------------------------------------------
-
-async fn run_init(init: InitInvocation, config_mode: ConfigMode) -> Result<()> {
-    if init.ui_child {
-        return run_init_child(
-            init.wait_channel.context("--ui-child requires --wait-channel")?,
-            init.config_path.context("--ui-child requires --config-path")?,
-            init_tpm_config_policy(config_mode, init.tpm_config_path, init.no_tpm_config),
-            init.data_root.context("--ui-child requires --data-root")?,
-            init.state_root.context("--ui-child requires --state-root")?,
-            config_mode,
-        )
-        .await;
-    }
-    if init.bootstrap {
-        return run_init_bootstrap(
-            init.config_path.context("--bootstrap requires --config-path")?,
-            init_tpm_config_policy(config_mode, init.tpm_config_path, init.no_tpm_config),
-            init.data_root.context("--bootstrap requires --data-root")?,
-            init.state_root.context("--bootstrap requires --state-root")?,
-            config_mode,
-        )
-        .await;
-    }
-    run_init_parent(config_mode).await
-}
-
-fn build_init_bootstrap_spec(
-    paths: &Paths,
-    config_mode: ConfigMode,
-    tpm_config_policy: &TpmConfigPolicy,
-) -> Result<tmux::InitBootstrapSpec> {
-    let exe = std::env::current_exe().context("failed to determine current executable")?;
-    Ok(tmux::InitBootstrapSpec {
-        exe,
-        config_path: paths.config_path.clone(),
-        tpm_config_policy: tpm_config_policy.clone(),
-        data_root: paths.data_root().to_path_buf(),
-        state_root: paths.state_root().to_path_buf(),
-        config_mode,
-    })
-}
-
-fn build_init_ui_child_spec(
-    paths: &Paths,
-    wait_channel: String,
-    config_mode: ConfigMode,
-    tpm_config_policy: &TpmConfigPolicy,
-) -> Result<tmux::InitUiChildSpec> {
-    let exe = std::env::current_exe().context("failed to determine current executable")?;
-    Ok(tmux::InitUiChildSpec {
-        exe,
-        config_path: paths.config_path.clone(),
-        tpm_config_policy: tpm_config_policy.clone(),
-        data_root: paths.data_root().to_path_buf(),
-        state_root: paths.state_root().to_path_buf(),
-        wait_channel,
-        config_mode,
-    })
-}
-
-fn read_and_cleanup_init_result(path: &std::path::Path) -> Result<i32> {
-    let result = read_init_result(path);
-    let _ = std::fs::remove_file(path);
-    result
-}
-
-async fn run_init_inline_fast_path(paths: &Paths, cfg: &tmup::model::Config) -> Result<()> {
-    match OperationLock::try_acquire(&paths.lock_path)? {
-        Some(guard) => run_init_inline(paths, cfg, guard).await,
-        None => {
-            let _ = tmux::display_message("tmup: waiting for another operation...");
-            let guard = OperationLock::acquire(&paths.lock_path)?;
-            run_init_inline(paths, cfg, guard).await
-        }
-    }
-}
-
-async fn run_init_with_ui_mode(
-    paths: &Paths,
-    target: &tmux::InitUiTarget,
-    mode: tmux::InitUiMode,
-    config_mode: ConfigMode,
-    tpm_config_policy: &TpmConfigPolicy,
-) -> Result<i32> {
-    let wait_channel = format!("tmup-init-{}-{}", std::process::id(), epoch_millis());
-    let result_file = paths.init_result_path(&wait_channel);
-    let _ = std::fs::remove_file(&result_file);
-    let spec = build_init_ui_child_spec(paths, wait_channel, config_mode, tpm_config_policy)?;
-
-    match mode {
-        tmux::InitUiMode::Popup { supports_title } => {
-            tmux::spawn_init_popup(&spec, target, &result_file, supports_title)?;
-            read_and_cleanup_init_result(&result_file).context("reading popup init result")
-        }
-        tmux::InitUiMode::Split => {
-            tmux::spawn_init_split(&spec, target, &result_file)?;
-            tmux::wait_for(&spec.wait_channel)?;
-            read_and_cleanup_init_result(&result_file).context("reading split init result")
-        }
-        tmux::InitUiMode::Inline => {
-            unreachable!("inline mode should bypass tmux UI spawning")
-        }
-    }
-}
-
-/// Parent init flow: preview whether work is needed, then either run inline,
-/// launch popup/split immediately when a usable tmux target already exists,
-/// or schedule a deferred bootstrap for cold startup.
-async fn run_init_parent(config_mode: ConfigMode) -> Result<()> {
-    let paths = resolve_runtime_paths()?;
-    paths.ensure_dirs()?;
-    let applied = apply_config_with_tpm_policy(&paths, config_mode, false, None)?;
-    let paths = applied.paths;
-    let cfg = applied.config;
-    let warnings = applied.warnings;
-    let tpm_config_policy = applied.tpm_config_policy;
-
-    // Lock-free preview: does this init need visible work?
-    let lock = load_lockfile(&paths)?;
-    let sync_preview =
-        sync::preview(&cfg, &lock, None, SyncPolicy::init(cfg.options.auto_install), &paths);
-    let needs_ui = sync_preview.needs_work;
-
-    if !needs_ui {
-        emit_config_warnings(&warnings);
-        return run_init_inline_fast_path(&paths, &cfg).await;
-    }
-
-    let ui_mode = tmux::init_ui_mode();
-    if matches!(ui_mode, tmux::InitUiMode::Inline) {
-        emit_config_warnings(&warnings);
-        let guard = OperationLock::acquire(&paths.lock_path)?;
-        return run_init_inline(&paths, &cfg, guard).await;
-    }
-
-    if let Some(target) = tmux::current_init_ui_target() {
-        let exit_code =
-            run_init_with_ui_mode(&paths, &target, ui_mode, config_mode, &tpm_config_policy)
-                .await?;
-        return if exit_code == 0 { Ok(()) } else { Err(progress::reported_error()) };
-    }
-
-    let spec = build_init_bootstrap_spec(&paths, config_mode, &tpm_config_policy)?;
-    if tmux::spawn_init_bootstrap(&spec).is_ok() {
-        return Ok(());
-    }
-
-    let _ = tmux::display_message("tmup: unable to schedule background bootstrap, running inline");
-    emit_config_warnings(&warnings);
-    let guard = OperationLock::acquire(&paths.lock_path)?;
-    run_init_inline(&paths, &cfg, guard).await
-}
-
-async fn run_init_bootstrap(
-    config_path: PathBuf,
-    tpm_config_policy: TpmConfigPolicy,
-    data_root: PathBuf,
-    state_root: PathBuf,
-    config_mode: ConfigMode,
-) -> Result<()> {
-    let paths = Paths::from_runtime_roots(data_root, state_root, config_path)?;
-    paths.ensure_dirs()?;
-    let applied =
-        apply_config_with_tpm_policy(&paths, config_mode, false, Some(tpm_config_policy))?;
-    let paths = applied.paths;
-    let cfg = applied.config;
-    let warnings = applied.warnings;
-    let tpm_config_policy = applied.tpm_config_policy;
-
-    let lock = load_lockfile(&paths)?;
-    let sync_preview =
-        sync::preview(&cfg, &lock, None, SyncPolicy::init(cfg.options.auto_install), &paths);
-    if !sync_preview.needs_work {
-        emit_config_warnings(&warnings);
-        return run_init_inline_fast_path(&paths, &cfg).await;
-    }
-
-    let ui_mode = tmux::init_ui_mode();
-    if matches!(ui_mode, tmux::InitUiMode::Inline) {
-        emit_config_warnings(&warnings);
-        let guard = OperationLock::acquire(&paths.lock_path)?;
-        return run_init_inline(&paths, &cfg, guard).await;
-    }
-
-    if let Some(target) = tmux::probe_init_ui_target() {
-        let exit_code =
-            run_init_with_ui_mode(&paths, &target, ui_mode, config_mode, &tpm_config_policy)
-                .await?;
-        return if exit_code == 0 { Ok(()) } else { Err(progress::reported_error()) };
-    }
-
-    // Falling through here is intentional: no UI target became available for
-    // the chosen tmux UI mode within the probe window.
-    let _ = tmux::display_message("tmup: unable to create progress UI, running inline");
-    emit_config_warnings(&warnings);
-    let guard = OperationLock::acquire(&paths.lock_path)?;
-    run_init_inline(&paths, &cfg, guard).await
-}
-
-enum InitCoreResult {
-    Success,
-    WriteFailures(Vec<String>),
-}
-
-/// Child init flow: runs inside a tmux popup/split-window with a live reporter.
-/// The shell wrapper handles wait-for signaling and exit code forwarding.
-async fn run_init_child(
-    _wait_channel: String, // signaled by the shell wrapper, not by Rust
-    config_path: PathBuf,
-    tpm_config_policy: TpmConfigPolicy,
-    data_root: PathBuf,
-    state_root: PathBuf,
-    config_mode: ConfigMode,
-) -> Result<()> {
-    let paths = Paths::from_runtime_roots(data_root, state_root, config_path)?;
-    paths.ensure_dirs()?;
-    let applied =
-        apply_config_with_tpm_policy(&paths, config_mode, false, Some(tpm_config_policy))?;
-    let paths = applied.paths;
-    let cfg = applied.config;
-    emit_config_warnings(&applied.warnings);
-
-    let reporter = progress::create_reporter(&paths, "init", &cfg, None);
-    reporter.report(ProgressEvent::OperationStart { command: "init" });
-    reporter.report(ProgressEvent::OperationStage { stage: OperationStage::WaitingForLock });
-
-    let _guard = OperationLock::acquire(&paths.lock_path)?;
-    match run_init_core(&cfg, &paths, &*reporter).await {
-        Ok(InitCoreResult::Success) => {
-            reporter.report(ProgressEvent::OperationEnd { command: "init", success: true });
-            Ok(())
-        }
-        Ok(InitCoreResult::WriteFailures(_)) => {
-            reporter.report(ProgressEvent::OperationEnd { command: "init", success: false });
-            Err(progress::reported_error())
-        }
-        Err(e) => {
-            if !progress::is_progress_failure(&e) {
-                let (summary, detail) = progress::summarize_error(&e);
-                reporter.report(ProgressEvent::OperationFailed { summary, detail });
-            }
-            reporter.report(ProgressEvent::OperationEnd { command: "init", success: false });
-            Err(progress::reported_error())
-        }
-    }
-}
-
-/// Inline init: no popup/split, just execute directly. Used when no visible
-/// work is expected or when tmux UI creation fails.
-async fn run_init_inline(
-    paths: &Paths,
-    cfg: &tmup::model::Config,
-    _guard: OperationLockGuard,
-) -> Result<()> {
-    match run_init_core(cfg, paths, &NullReporter).await? {
-        InitCoreResult::Success => Ok(()),
-        InitCoreResult::WriteFailures(write_failures) => {
-            anyhow::bail!(
-                "init encountered {} failure(s):\n  {}",
-                write_failures.len(),
-                write_failures.join("\n  ")
-            );
-        }
-    }
-}
-
-async fn run_init_core(
-    cfg: &tmup::model::Config,
-    paths: &Paths,
-    reporter: &dyn ProgressReporter,
-) -> Result<InitCoreResult> {
-    config_mode::ensure_tmup_config_exists(paths)?;
-    let mut lock = load_lockfile(paths)?;
-    reporter.report(ProgressEvent::OperationStage { stage: OperationStage::Syncing });
-    let outcome = sync::run_and_write(
-        cfg,
-        &mut lock,
-        paths,
-        None,
-        SyncPolicy::init(cfg.options.auto_install),
-        SyncMode::Init,
-        reporter,
-    )
-    .await?;
-
-    reporter.report(ProgressEvent::OperationStage { stage: OperationStage::LoadingTmux });
-    let load_plan = loader::build_load_plan(cfg, &paths.plugin_root);
-    tmux::execute_plan(&load_plan)?;
-
-    if outcome.is_clean() {
-        Ok(InitCoreResult::Success)
-    } else {
-        Ok(InitCoreResult::WriteFailures(outcome.plugin_failures))
-    }
-}
-
-fn read_init_result(path: &std::path::Path) -> Result<i32> {
-    #[derive(serde::Deserialize)]
-    struct InitResult {
-        exit_code: i32,
-    }
-    let invalid = || format!("init child exited without a valid result record: {}", path.display());
-    let content = std::fs::read_to_string(path).with_context(invalid)?;
-    let result = serde_json::from_str::<InitResult>(&content).with_context(invalid)?;
-    Ok(result.exit_code)
-}
-
-fn epoch_millis() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
 }
 
 // ---------------------------------------------------------------------------
