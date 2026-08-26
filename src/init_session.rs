@@ -218,7 +218,7 @@ async fn run_loaded_with_adapter(
     if tmux.defer(published.record_path()).is_ok() {
         return Ok(Outcome::Deferred);
     }
-    published.cleanup()?;
+    let _ = published.cleanup();
     tmux.display_fallback("tmup: unable to schedule background bootstrap, running inline");
     execute_inline(&context, &loaded.warnings, LockWaitMessage::Silent, tmux).await
 }
@@ -570,6 +570,8 @@ async fn execute_core(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
     use tempfile::tempdir;
@@ -598,6 +600,8 @@ mod tests {
         config_replacement_on_ui_inspection: Option<(PathBuf, String)>,
         config_replacement_on_defer: Option<(PathBuf, String)>,
         defer_fails: bool,
+        #[cfg(unix)]
+        block_record_cleanup_on_defer: bool,
     }
 
     impl MockTmux {
@@ -612,6 +616,8 @@ mod tests {
                 config_replacement_on_ui_inspection: None,
                 config_replacement_on_defer: None,
                 defer_fails: false,
+                #[cfg(unix)]
+                block_record_cleanup_on_defer: false,
             }
         }
     }
@@ -639,6 +645,12 @@ mod tests {
             self.requests.push(Request::Defer(resume_path.to_path_buf()));
             if let Some((path, contents)) = self.config_replacement_on_defer.take() {
                 std::fs::write(path, contents).unwrap();
+            }
+            #[cfg(unix)]
+            if self.block_record_cleanup_on_defer {
+                let sessions_root = resume_path.parent().unwrap().parent().unwrap();
+                std::fs::set_permissions(sessions_root, std::fs::Permissions::from_mode(0o500))
+                    .unwrap();
             }
             if self.defer_fails {
                 anyhow::bail!("unable to schedule deferred bootstrap")
@@ -918,6 +930,26 @@ mod tests {
             !record_path.parent().unwrap().exists(),
             "a failed deferred spawn must clean the session it created"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn record_cleanup_failure_does_not_cancel_inline_fallback() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        let sessions_root = context.state_root.join("init-sessions");
+        let mut tmux = MockTmux::hosted();
+        tmux.defer_fails = true;
+        tmux.block_record_cleanup_on_defer = true;
+        tmux.config_replacement_on_defer = Some((context.config_path.clone(), String::new()));
+
+        let result = run_with_adapter(context, &mut tmux).await;
+        std::fs::set_permissions(&sessions_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(result.unwrap(), Outcome::Completed);
+        assert!(tmux.requests.iter().any(|request| matches!(request, Request::Fallback(_))));
+        assert!(tmux.requests.iter().any(|request| matches!(request, Request::Load(_))));
     }
 
     #[tokio::test]
