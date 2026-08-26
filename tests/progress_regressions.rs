@@ -130,6 +130,163 @@ esac
     bin_dir
 }
 
+fn write_fake_tmux_executing_popup(root: &Path, log_path: &Path) -> PathBuf {
+    let bin_dir = root.join("bin-executing-popup");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let script = bin_dir.join("tmux");
+    std::fs::write(
+        &script,
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1" in
+  -V) printf 'tmux 3.3a\n'; exit 0 ;;
+  display-message)
+    if [ "$2" = "-p" ]; then
+      case "$3" in
+        '#{{client_name}}') printf '/dev/pts/99\n'; exit 0 ;;
+        '#{{pane_id}}') printf '%%42\n'; exit 0 ;;
+      esac
+    fi
+    exit 0 ;;
+  display-popup)
+    for wrapper do :; done
+    printf 'event:popup-entered\n' >> "{log}"
+    sh -c "$wrapper"
+    status=$?
+    printf 'event:popup-returned\n' >> "{log}"
+    exit "$status" ;;
+  run-shell|wait-for|split-window|set-environment|set|set-option) exit 0 ;;
+  *) exit 0 ;;
+esac
+"#,
+            log = log_path.display(),
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+    }
+    bin_dir
+}
+
+fn write_fake_tmux_executing_split(root: &Path, log_path: &Path, state_home: &Path) -> PathBuf {
+    let bin_dir = root.join("bin-executing-split");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let script = bin_dir.join("tmux");
+    let handshake = root.join("split-handshake");
+    std::fs::create_dir_all(&handshake).unwrap();
+    std::fs::write(
+        &script,
+        format!(
+            r#"#!/bin/sh
+handshake="{handshake}"
+printf '%s\n' "$*" >> "{log}"
+case "$1" in
+  -V) printf 'tmux 2.0\n'; exit 0 ;;
+  display-message)
+    if [ "$2" = "-p" ]; then
+      case "$3" in
+        '#{{client_name}}') printf '/dev/pts/99\n'; exit 0 ;;
+        '#{{pane_id}}') printf '%%42\n'; exit 0 ;;
+      esac
+    fi
+    exit 0 ;;
+  split-window)
+    for wrapper do :; done
+    (
+      attempts=0
+      while [ ! -f "$handshake/wait-started" ]; do
+        attempts=$((attempts + 1))
+        [ "$attempts" -lt 500 ] || exit 70
+        sleep 0.01
+      done
+      sh -c "$wrapper"
+    ) >/dev/null 2>&1 &
+    printf 'event:split-returned\n' >> "{log}"
+    exit 0 ;;
+  wait-for)
+    if [ "$2" = "-S" ]; then
+      result_present=false
+      for result in "{state_home}"/tmup/init-sessions/session-*/child-result.json; do
+        if [ -f "$result" ]; then
+          result_present=true
+          break
+        fi
+      done
+      printf 'event:signal-result-%s\n' "$result_present" >> "{log}"
+      : > "$handshake/signal-$3"
+      exit 0
+    fi
+    : > "$handshake/wait-started"
+    attempts=0
+    while [ ! -f "$handshake/signal-$2" ]; do
+      attempts=$((attempts + 1))
+      [ "$attempts" -lt 500 ] || exit 71
+      sleep 0.01
+    done
+    printf 'event:wait-returned\n' >> "{log}"
+    exit 0 ;;
+  run-shell|display-popup|set-environment|set|set-option) exit 0 ;;
+  *) exit 0 ;;
+esac
+"#,
+            handshake = handshake.display(),
+            log = log_path.display(),
+            state_home = state_home.display(),
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+    }
+    bin_dir
+}
+
+fn write_fake_tmux_split_wait_failure(root: &Path, log_path: &Path) -> PathBuf {
+    let bin_dir = root.join("bin-split-wait-failure");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let script = bin_dir.join("tmux");
+    std::fs::write(
+        &script,
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1" in
+  -V) printf 'tmux 2.0\n'; exit 0 ;;
+  display-message)
+    if [ "$2" = "-p" ]; then
+      case "$3" in
+        '#{{client_name}}') printf '/dev/pts/99\n'; exit 0 ;;
+        '#{{pane_id}}') printf '%%42\n'; exit 0 ;;
+      esac
+    fi
+    exit 0 ;;
+  split-window) exit 0 ;;
+  wait-for) exit 1 ;;
+  run-shell|display-popup|set-environment|set|set-option) exit 0 ;;
+  *) exit 0 ;;
+esac
+"#,
+            log = log_path.display(),
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+    }
+    bin_dir
+}
+
 fn write_fake_tmux_retry_probe_with_log(root: &Path, log_path: &Path) -> PathBuf {
     write_fake_tmux_retry_probe_until_with_log(root, log_path, 1)
 }
@@ -1215,6 +1372,144 @@ fn init_bootstrap_popup_path_targets_explicit_client_and_skips_wait_for() {
     assert!(
         !log.lines().any(|line| line.starts_with("wait-for ")),
         "popup path should not call wait-for (display-popup already blocks), got log:\n{log}"
+    );
+}
+
+#[test]
+fn production_popup_blocks_until_the_real_child_publishes_its_result() {
+    let dir = tempdir().unwrap();
+    make_remote_repo(dir.path());
+    let gitconfig = write_git_rewrite_config(dir.path());
+    let config_dir = dir.path().join("config/tmux");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_path = config_dir.join("tmup.kdl");
+    std::fs::write(
+        &config_path,
+        "options { auto-install #true }\nplugin \"https://example.com/test/plugin.git\"\n",
+    )
+    .unwrap();
+    let record_path = schedule_bootstrap_record(dir.path(), &config_path, None);
+    let session_dir = record_path.parent().unwrap().to_path_buf();
+    let state_home = dir.path().join("state");
+
+    let tmux_log = dir.path().join("executing-popup.log");
+    let fake_tmux_dir = write_fake_tmux_executing_popup(dir.path(), &tmux_log);
+    let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
+
+    let output = Command::cargo_bin("tmup")
+        .unwrap()
+        .args(["init", "--resume", record_path.to_str().unwrap()])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", gitconfig)
+        .env("PATH", path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "stderr:\n{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        dir.path().join("data/tmup/plugins/example.com/test/plugin/init.tmux").is_file(),
+        "the popup fake must execute the real hosted child"
+    );
+    assert!(
+        !session_dir.exists(),
+        "the popup parent may clean only after consuming the published child result"
+    );
+    let log = std::fs::read_to_string(&tmux_log).unwrap();
+    let entered = log.find("event:popup-entered").unwrap();
+    let returned = log.find("event:popup-returned").unwrap();
+    assert!(entered < returned, "popup execution events were out of order:\n{log}");
+    assert!(
+        !log.lines().any(|line| line.starts_with("wait-for ")),
+        "popup completion must be provided by the blocking display-popup call:\n{log}"
+    );
+    assert!(
+        state_home.join("tmup/init-sessions").exists(),
+        "the production adapter should use the isolated Init Session root"
+    );
+}
+
+#[test]
+fn production_split_waits_for_child_signal_before_consuming_the_result() {
+    let dir = tempdir().unwrap();
+    make_remote_repo(dir.path());
+    let gitconfig = write_git_rewrite_config(dir.path());
+    let config_dir = dir.path().join("config/tmux");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_path = config_dir.join("tmup.kdl");
+    std::fs::write(
+        &config_path,
+        "options { auto-install #true }\nplugin \"https://example.com/test/plugin.git\"\n",
+    )
+    .unwrap();
+    let record_path = schedule_bootstrap_record(dir.path(), &config_path, None);
+    let session_dir = record_path.parent().unwrap().to_path_buf();
+    let state_home = dir.path().join("state");
+
+    let tmux_log = dir.path().join("executing-split.log");
+    let fake_tmux_dir = write_fake_tmux_executing_split(dir.path(), &tmux_log, &state_home);
+    let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
+
+    let output = Command::cargo_bin("tmup")
+        .unwrap()
+        .args(["init", "--resume", record_path.to_str().unwrap()])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", gitconfig)
+        .env("PATH", path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "stderr:\n{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        !session_dir.exists(),
+        "the split parent may clean only after signal and result consumption"
+    );
+    let log = std::fs::read_to_string(&tmux_log).unwrap();
+    let split_returned = log.find("event:split-returned").unwrap();
+    let signal = log.find("event:signal-result-true").unwrap_or_else(|| {
+        panic!("the child must publish its result before signaling the split parent:\n{log}")
+    });
+    let wait_returned = log.find("event:wait-returned").unwrap();
+    assert!(
+        split_returned < signal && signal < wait_returned,
+        "split launch, child publication signal, and parent wait must be ordered:\n{log}"
+    );
+}
+
+#[test]
+fn production_split_preserves_session_when_wait_completion_is_unknown() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("config/tmux");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_path = config_dir.join("tmup.kdl");
+    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    let record_path = schedule_bootstrap_record(dir.path(), &config_path, None);
+    let session_dir = record_path.parent().unwrap().to_path_buf();
+
+    let tmux_log = dir.path().join("split-wait-failure.log");
+    let fake_tmux_dir = write_fake_tmux_split_wait_failure(dir.path(), &tmux_log);
+    let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
+
+    let output = Command::cargo_bin("tmup")
+        .unwrap()
+        .args(["init", "--resume", record_path.to_str().unwrap()])
+        .env("PATH", path)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "a failed split wait must fail the parent command");
+    assert!(
+        session_dir.exists(),
+        "a successful split launch with unknown terminal completion must preserve its Init Session"
+    );
+    assert!(
+        session_dir.join("ui-child.json").is_file(),
+        "the preserved session must retain the unclaimed child continuation"
+    );
+    let log = std::fs::read_to_string(&tmux_log).unwrap();
+    assert!(log.contains("split-window "), "the child must have been launched:\n{log}");
+    assert!(
+        log.lines().any(|line| line.starts_with("wait-for ")),
+        "the failure must occur while waiting for terminal completion:\n{log}"
     );
 }
 

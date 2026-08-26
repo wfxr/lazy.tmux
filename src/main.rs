@@ -144,7 +144,14 @@ fn emit_config_warnings(warnings: &[String]) {
 }
 
 fn apply_config(paths: &Paths, mode: ConfigMode, create_missing: bool) -> Result<AppliedConfig> {
-    let applied = apply_config_with_tpm_policy(paths, mode, create_missing, None)?;
+    let request = config_mode::LoadRequest::from_command(
+        mode,
+        create_missing,
+        default_tpm_config_policy(mode),
+    );
+    let loaded = config_mode::load_with_request(paths, request)?;
+    let applied =
+        AppliedConfig { paths: loaded.paths, config: loaded.config, warnings: loaded.warnings };
     emit_config_warnings(&applied.warnings);
     Ok(applied)
 }
@@ -154,21 +161,6 @@ fn default_tpm_config_policy(mode: ConfigMode) -> TpmConfigPolicy {
         ConfigMode::Pure => TpmConfigPolicy::Disabled,
         ConfigMode::Mixed => TpmConfigPolicy::Discover,
     }
-}
-
-fn apply_config_with_tpm_policy(
-    paths: &Paths,
-    mode: ConfigMode,
-    create_missing: bool,
-    explicit_tpm_policy: Option<TpmConfigPolicy>,
-) -> Result<AppliedConfig> {
-    let request = config_mode::LoadRequest::from_command(
-        mode,
-        create_missing,
-        explicit_tpm_policy.unwrap_or_else(|| default_tpm_config_policy(mode)),
-    );
-    let loaded = config_mode::load_with_request(paths, request)?;
-    Ok(AppliedConfig { paths: loaded.paths, config: loaded.config, warnings: loaded.warnings })
 }
 
 fn load_lockfile(paths: &Paths) -> Result<lockfile::LockFile> {
@@ -496,11 +488,9 @@ mod tests {
 
     use anstream::{AutoStream, ColorChoice};
     use clap::Parser;
-    use tempfile::tempdir;
-    use tmup::config_mode::{ConfigMode, TpmConfigPolicy};
-    use tmup::state::Paths;
+    use tmup::config_mode::ConfigMode;
 
-    use super::{Cli, Commands, apply_config_with_tpm_policy, parse_config_mode_env, render_table};
+    use super::{Cli, Commands, parse_config_mode_env, render_table};
 
     fn adapt(text: &str, choice: ColorChoice) -> String {
         let mut stream = AutoStream::new(Vec::new(), choice);
@@ -551,39 +541,5 @@ mod tests {
         assert!(err.to_string().contains("TMUP_CONFIG_MODE"));
         assert!(err.to_string().contains("pure"));
         assert!(err.to_string().contains("mixed"));
-    }
-
-    #[test]
-    fn apply_config_with_tpm_policy_returns_warnings_for_init_callers() {
-        let dir = tempdir().unwrap();
-        let config_dir = dir.path().join("config/tmux");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        let tmup_config = config_dir.join("tmup.kdl");
-        let tpm_config = config_dir.join("tmux.conf");
-        std::fs::write(&tmup_config, r#"plugin "tmux-plugins/tmux-sensible" branch="feature""#)
-            .unwrap();
-        std::fs::write(
-            &tpm_config,
-            "set -g @plugin 'tmux-plugins/tmux-sensible'\nset -g @plugin 'tmux-plugins/tmux-yank'\n",
-        )
-        .unwrap();
-
-        let paths = Paths::from_runtime_roots(
-            dir.path().join("data"),
-            dir.path().join("state"),
-            tmup_config,
-        )
-        .unwrap();
-
-        let applied = apply_config_with_tpm_policy(
-            &paths,
-            ConfigMode::Mixed,
-            false,
-            Some(TpmConfigPolicy::Resolved(Some(tpm_config))),
-        )
-        .unwrap();
-
-        assert_eq!(applied.warnings.len(), 1);
-        assert!(applied.warnings[0].contains("github.com/tmux-plugins/tmux-sensible"));
     }
 }
