@@ -80,7 +80,24 @@ impl PublicInvocation {
 struct ChildHandoff<'session> {
     context: InvocationContext,
     source: record::UiChildSource,
-    session: Option<&'session record::SessionOwner>,
+    session: Option<&'session mut record::SessionOwner>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChildDisposition {
+    Completed,
+    CompletedWithPluginFailures(Vec<String>),
+}
+
+impl From<ChildDisposition> for Outcome {
+    fn from(disposition: ChildDisposition) -> Self {
+        match disposition {
+            ChildDisposition::Completed => Self::Completed,
+            ChildDisposition::CompletedWithPluginFailures(failures) => {
+                Self::CompletedWithPluginFailures(failures)
+            }
+        }
+    }
 }
 
 trait TmuxAdapter {
@@ -88,7 +105,7 @@ trait TmuxAdapter {
     fn current_host_available(&mut self) -> bool;
     fn wait_for_host(&mut self) -> bool;
     fn defer(&mut self, resume_path: &Path) -> Result<()>;
-    fn host_child(&mut self, handoff: ChildHandoff<'_>) -> Result<()>;
+    fn host_child(&mut self, handoff: ChildHandoff<'_>) -> Result<ChildDisposition>;
     fn display_fallback(&mut self, message: &str);
     fn display_waiting(&mut self);
     fn execute_load_plan(&mut self, plan: &[TmuxCommand]) -> Result<()>;
@@ -103,7 +120,7 @@ async fn resume_with_adapter(
 
 async fn resume_with_adapter_in_session(
     continuation: Continuation,
-    session: Option<&record::SessionOwner>,
+    session: Option<&mut record::SessionOwner>,
     tmux: &mut impl TmuxAdapter,
 ) -> Result<Outcome> {
     match continuation {
@@ -122,12 +139,12 @@ async fn resume_with_adapter_in_session(
                 return execute_inline(&context, &loaded.warnings, LockWaitMessage::Silent, tmux)
                     .await;
             }
-            tmux.host_child(ChildHandoff {
+            let disposition = tmux.host_child(ChildHandoff {
                 context,
                 source: record::UiChildSource::DeferredBootstrap,
                 session,
             })?;
-            Ok(Outcome::Completed)
+            Ok(disposition.into())
         }
         Continuation::HostedChild(context) => execute_hosted(&context, tmux).await,
     }
@@ -142,10 +159,10 @@ pub(crate) async fn run(invocation: PublicInvocation) -> Result<Outcome> {
 async fn resume_record_with_adapter(path: &Path, tmux: &mut impl TmuxAdapter) -> Result<Outcome> {
     match record::claim(path)? {
         record::ClaimedContinuation::Bootstrap(claimed) => {
-            let (context, owner) = claimed.into_parts();
+            let (context, mut owner) = claimed.into_parts();
             match resume_with_adapter_in_session(
                 Continuation::DeferredBootstrap(context),
-                Some(&owner),
+                Some(&mut owner),
                 tmux,
             )
             .await
@@ -255,12 +272,12 @@ async fn run_loaded_with_adapter(
         return execute_inline(&context, &loaded.warnings, LockWaitMessage::Silent, tmux).await;
     }
     if tmux.current_host_available() {
-        tmux.host_child(ChildHandoff {
+        let disposition = tmux.host_child(ChildHandoff {
             context,
             source: record::UiChildSource::Direct,
             session: None,
         })?;
-        return Ok(Outcome::Completed);
+        return Ok(disposition.into());
     }
     let published = record::publish_bootstrap(&context)?;
     if tmux.defer(published.record_path()).is_ok() {
@@ -695,7 +712,7 @@ impl TmuxAdapter for ProductionTmux {
         Self::spawn_bootstrap(&Self::resume_spec(resume_path)?)
     }
 
-    fn host_child(&mut self, handoff: ChildHandoff<'_>) -> Result<()> {
+    fn host_child(&mut self, handoff: ChildHandoff<'_>) -> Result<ChildDisposition> {
         let ChildHandoff { context, source, session } = handoff;
         let target = self.target.as_ref().context("tmux host target is unavailable")?;
         let mode = self.ui_mode.context("tmux UI availability was not inspected")?;
@@ -705,19 +722,22 @@ impl TmuxAdapter for ProductionTmux {
             Some(wait_channel) => record::UiHost::Split { wait_channel: wait_channel.clone() },
             None => record::UiHost::Popup,
         };
-        let published = record::publish_ui_child(&context, source, host, session)?;
+        let mut published = record::publish_ui_child(&context, source, host, session)?;
         let hosted = (|| {
             let spec = Self::resume_spec(published.record_path())?;
             match mode {
                 InitUiMode::Popup { supports_title } => {
                     Self::spawn_popup(&spec, target, supports_title)?;
+                    published.terminal_completion_confirmed();
                     record::consume_child_result(published.result_path())
                         .context("reading popup init result")
                 }
                 InitUiMode::Split => {
                     let wait_channel = wait_channel.as_deref().unwrap();
                     Self::spawn_split(&spec, target, wait_channel)?;
+                    published.child_launched();
                     Self::wait_for(wait_channel)?;
+                    published.terminal_completion_confirmed();
                     record::consume_child_result(published.result_path())
                         .context("reading split init result")
                 }
@@ -738,9 +758,11 @@ impl TmuxAdapter for ProductionTmux {
             }
         };
         match result {
-            record::ChildResult::Completed => Ok(()),
-            record::ChildResult::CompletedWithPluginFailures { .. }
-            | record::ChildResult::OperationFailed => Err(progress::reported_error()),
+            record::ChildResult::Completed => Ok(ChildDisposition::Completed),
+            record::ChildResult::CompletedWithPluginFailures { failures } => {
+                Ok(ChildDisposition::CompletedWithPluginFailures(failures))
+            }
+            record::ChildResult::OperationFailed => Err(progress::reported_error()),
         }
     }
 
@@ -820,6 +842,12 @@ mod tests {
         Load(Vec<TmuxCommand>),
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum HostFailure {
+        CompletionUnknown,
+        CompletionConfirmed,
+    }
+
     struct MockTmux {
         requests: Vec<Request>,
         ui_available: bool,
@@ -830,6 +858,8 @@ mod tests {
         config_replacement_on_ui_inspection: Option<(PathBuf, String)>,
         config_replacement_on_defer: Option<(PathBuf, String)>,
         defer_fails: bool,
+        host_disposition: ChildDisposition,
+        host_failure: Option<HostFailure>,
         #[cfg(unix)]
         block_record_cleanup_on_defer: bool,
     }
@@ -846,6 +876,8 @@ mod tests {
                 config_replacement_on_ui_inspection: None,
                 config_replacement_on_defer: None,
                 defer_fails: false,
+                host_disposition: ChildDisposition::Completed,
+                host_failure: None,
                 #[cfg(unix)]
                 block_record_cleanup_on_defer: false,
             }
@@ -888,13 +920,29 @@ mod tests {
             Ok(())
         }
 
-        fn host_child(&mut self, handoff: ChildHandoff<'_>) -> Result<()> {
+        fn host_child(&mut self, handoff: ChildHandoff<'_>) -> Result<ChildDisposition> {
+            let ChildHandoff { context, source, mut session } = handoff;
             self.requests.push(Request::HostChild {
-                context: handoff.context,
-                source: handoff.source,
-                reuses_session: handoff.session.is_some(),
+                context,
+                source,
+                reuses_session: session.is_some(),
             });
-            Ok(())
+            match self.host_failure {
+                Some(HostFailure::CompletionUnknown) => {
+                    if let Some(owner) = session.as_deref_mut() {
+                        owner.child_launched();
+                    }
+                    anyhow::bail!("hosted child completion is unknown")
+                }
+                Some(HostFailure::CompletionConfirmed) => {
+                    if let Some(owner) = session.as_deref_mut() {
+                        owner.child_launched();
+                        owner.terminal_completion_confirmed();
+                    }
+                    Err(progress::reported_error())
+                }
+                None => Ok(self.host_disposition.clone()),
+            }
         }
 
         fn display_fallback(&mut self, message: &str) {
@@ -1336,6 +1384,88 @@ mod tests {
                     reuses_session: false,
                 },
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_parent_preserves_named_hosted_plugin_failures() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        let mut tmux = MockTmux::hosted();
+        tmux.current_host_available = true;
+        tmux.host_disposition = ChildDisposition::CompletedWithPluginFailures(vec![
+            "example.com/test/plugin: build failed".into(),
+        ]);
+
+        let outcome = run_with_adapter(context, &mut tmux).await.unwrap();
+
+        assert_eq!(
+            outcome,
+            Outcome::CompletedWithPluginFailures(vec![
+                "example.com/test/plugin: build failed".into()
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_parent_preserves_named_hosted_plugin_failures() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        let continuation = Continuation::DeferredBootstrap(context);
+        let mut tmux = MockTmux::hosted();
+        tmux.host_disposition = ChildDisposition::CompletedWithPluginFailures(vec![
+            "example.com/test/plugin: build failed".into(),
+        ]);
+
+        let outcome = resume_with_adapter(continuation, &mut tmux).await.unwrap();
+
+        assert_eq!(
+            outcome,
+            Outcome::CompletedWithPluginFailures(vec![
+                "example.com/test/plugin: build failed".into()
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn resumed_bootstrap_preserves_session_when_child_completion_is_unknown() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        let published = record::publish_bootstrap(&context).unwrap();
+        let record_path = published.record_path().to_path_buf();
+        let session_dir = record_path.parent().unwrap().to_path_buf();
+        let mut tmux = MockTmux::hosted();
+        tmux.host_failure = Some(HostFailure::CompletionUnknown);
+
+        let result = resume_record_with_adapter(&record_path, &mut tmux).await;
+
+        assert!(result.is_err());
+        assert!(
+            session_dir.exists(),
+            "the outer bootstrap owner must preserve a session whose child completion is unknown"
+        );
+    }
+
+    #[tokio::test]
+    async fn resumed_bootstrap_cleans_session_after_confirmed_child_termination() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        let published = record::publish_bootstrap(&context).unwrap();
+        let record_path = published.record_path().to_path_buf();
+        let session_dir = record_path.parent().unwrap().to_path_buf();
+        let mut tmux = MockTmux::hosted();
+        tmux.host_failure = Some(HostFailure::CompletionConfirmed);
+
+        let result = resume_record_with_adapter(&record_path, &mut tmux).await;
+
+        assert!(result.is_err());
+        assert!(
+            !session_dir.exists(),
+            "the outer bootstrap owner must clean a session after confirmed child termination"
         );
     }
 

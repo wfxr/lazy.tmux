@@ -32,7 +32,7 @@ pub mod state;
 pub mod sync;
 /// Terminal styling helpers (colored, aligned label lines).
 pub mod termui;
-/// tmux command abstraction and init UI spawning helpers.
+/// tmux command execution and display-message helpers.
 pub mod tmux;
 
 /// Return the first 7 characters of a commit hash for display.

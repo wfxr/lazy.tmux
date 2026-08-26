@@ -34,14 +34,18 @@ pub(super) struct PublishedBootstrap {
 }
 
 #[derive(Debug)]
-pub(super) struct PublishedUiChild {
-    session_dir: PathBuf,
+pub(super) struct PublishedUiChild<'session> {
+    session: SessionOwnership<'session>,
     record_path: PathBuf,
     result_path: PathBuf,
-    owns_session: bool,
 }
 
-impl PublishedUiChild {
+impl PublishedUiChild<'_> {
+    #[cfg(test)]
+    fn session_dir(&self) -> &Path {
+        self.session.session_dir()
+    }
+
     pub(super) fn record_path(&self) -> &Path {
         &self.record_path
     }
@@ -50,8 +54,16 @@ impl PublishedUiChild {
         &self.result_path
     }
 
+    pub(super) fn child_launched(&mut self) {
+        self.session.child_launched();
+    }
+
+    pub(super) fn terminal_completion_confirmed(&mut self) {
+        self.session.terminal_completion_confirmed();
+    }
+
     pub(super) fn cleanup(self) -> Result<()> {
-        if self.owns_session { cleanup_session_directory(&self.session_dir) } else { Ok(()) }
+        self.session.cleanup()
     }
 }
 
@@ -126,7 +138,7 @@ impl ClaimedBootstrap {
     }
 
     pub(super) fn into_parts(self) -> (InvocationContext, SessionOwner) {
-        (self.context, SessionOwner { session_dir: self.session_dir })
+        (self.context, SessionOwner::new(self.session_dir))
     }
 
     #[cfg(test)]
@@ -138,15 +150,73 @@ impl ClaimedBootstrap {
 #[derive(Debug)]
 pub(super) struct SessionOwner {
     session_dir: PathBuf,
+    cleanup: SessionCleanup,
 }
 
 impl SessionOwner {
+    fn new(session_dir: PathBuf) -> Self {
+        Self { session_dir, cleanup: SessionCleanup::Safe }
+    }
+
     fn session_dir(&self) -> &Path {
         &self.session_dir
     }
 
+    pub(super) fn child_launched(&mut self) {
+        self.cleanup = SessionCleanup::Preserve;
+    }
+
+    pub(super) fn terminal_completion_confirmed(&mut self) {
+        self.cleanup = SessionCleanup::Safe;
+    }
+
     pub(super) fn cleanup(self) -> Result<()> {
-        cleanup_session_directory(&self.session_dir)
+        match self.cleanup {
+            SessionCleanup::Safe => cleanup_session_directory(&self.session_dir),
+            SessionCleanup::Preserve => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionCleanup {
+    Safe,
+    Preserve,
+}
+
+#[derive(Debug)]
+enum SessionOwnership<'session> {
+    Owned(SessionOwner),
+    Borrowed(&'session mut SessionOwner),
+}
+
+impl SessionOwnership<'_> {
+    fn session_dir(&self) -> &Path {
+        match self {
+            Self::Owned(owner) => owner.session_dir(),
+            Self::Borrowed(owner) => owner.session_dir(),
+        }
+    }
+
+    fn child_launched(&mut self) {
+        match self {
+            Self::Owned(owner) => owner.child_launched(),
+            Self::Borrowed(owner) => owner.child_launched(),
+        }
+    }
+
+    fn terminal_completion_confirmed(&mut self) {
+        match self {
+            Self::Owned(owner) => owner.terminal_completion_confirmed(),
+            Self::Borrowed(owner) => owner.terminal_completion_confirmed(),
+        }
+    }
+
+    fn cleanup(self) -> Result<()> {
+        match self {
+            Self::Owned(owner) => owner.cleanup(),
+            Self::Borrowed(_) => Ok(()),
+        }
     }
 }
 
@@ -284,54 +354,50 @@ pub(super) fn publish_bootstrap(context: &InvocationContext) -> Result<Published
     publication
 }
 
-pub(super) fn publish_ui_child(
+pub(super) fn publish_ui_child<'session>(
     context: &InvocationContext,
     source: UiChildSource,
     host: UiHost,
-    session: Option<&SessionOwner>,
-) -> Result<PublishedUiChild> {
+    session: Option<&'session mut SessionOwner>,
+) -> Result<PublishedUiChild<'session>> {
     validate_context_paths(context)?;
-    let (session_dir, owns_session) = match session {
-        Some(owner) => (owner.session_dir().to_path_buf(), false),
-        None => (create_session_directory(&context.state_root)?, true),
-    };
-    let publication = (|| -> Result<PublishedUiChild> {
-        let completion = match host {
-            UiHost::Popup => {
-                RecordedUiCompletion::Popup { result_name: CHILD_RESULT_RECORD.into() }
-            }
-            UiHost::Split { wait_channel } => RecordedUiCompletion::Split {
-                result_name: CHILD_RESULT_RECORD.into(),
-                wait_channel: {
-                    ensure!(
-                        !wait_channel.is_empty(),
-                        "split completion wait channel must not be empty"
-                    );
-                    wait_channel
-                },
+    let completion = match host {
+        UiHost::Popup => RecordedUiCompletion::Popup { result_name: CHILD_RESULT_RECORD.into() },
+        UiHost::Split { wait_channel } => RecordedUiCompletion::Split {
+            result_name: CHILD_RESULT_RECORD.into(),
+            wait_channel: {
+                ensure!(
+                    !wait_channel.is_empty(),
+                    "split completion wait channel must not be empty"
+                );
+                wait_channel
             },
-        };
-        let record = ContinuationRecord::ui_child(context, source, completion);
-        let record_path = publish_record(
-            &session_dir,
-            TEMP_UI_CHILD_RECORD,
-            UI_CHILD_RECORD,
-            &record,
-            "continuation record",
-        )?;
+        },
+    };
+    let session = match session {
+        Some(owner) => SessionOwnership::Borrowed(owner),
+        None => SessionOwnership::Owned(SessionOwner::new(create_session_directory(
+            &context.state_root,
+        )?)),
+    };
+    let session_dir = session.session_dir().to_path_buf();
+    let record = ContinuationRecord::ui_child(context, source, completion);
+    let record_path = match publish_record(
+        &session_dir,
+        TEMP_UI_CHILD_RECORD,
+        UI_CHILD_RECORD,
+        &record,
+        "continuation record",
+    ) {
+        Ok(record_path) => record_path,
+        Err(error) => {
+            let _ = session.cleanup();
+            return Err(error);
+        }
+    };
 
-        let result_path = session_dir.join(CHILD_RESULT_RECORD);
-        Ok(PublishedUiChild {
-            session_dir: session_dir.clone(),
-            record_path,
-            result_path,
-            owns_session,
-        })
-    })();
-    if publication.is_err() && owns_session {
-        let _ = fs::remove_dir_all(&session_dir);
-    }
-    publication
+    let result_path = session_dir.join(CHILD_RESULT_RECORD);
+    Ok(PublishedUiChild { session, record_path, result_path })
 }
 
 pub(super) fn claim_bootstrap(record_path: &Path) -> Result<ClaimedBootstrap> {
@@ -721,7 +787,7 @@ mod tests {
         assert_eq!(value["continuation"]["completion"]["wait_channel"], "tmup-init-test");
         assert_eq!(value["continuation"]["completion"]["result_name"], CHILD_RESULT_RECORD);
         assert!(published.record_path().is_file());
-        assert!(!published.session_dir.join(TEMP_UI_CHILD_RECORD).exists());
+        assert!(!published.session_dir().join(TEMP_UI_CHILD_RECORD).exists());
 
         #[cfg(unix)]
         assert_eq!(
@@ -757,26 +823,28 @@ mod tests {
         let context = context(dir.path());
         let bootstrap = publish_bootstrap(&context).unwrap();
         let bootstrap_path = bootstrap.record_path().to_path_buf();
-        let (_, owner) = claim_bootstrap(&bootstrap_path).unwrap().into_parts();
+        let (_, mut owner) = claim_bootstrap(&bootstrap_path).unwrap().into_parts();
         let first = publish_ui_child(
             &context,
             UiChildSource::DeferredBootstrap,
             UiHost::Popup,
-            Some(&owner),
+            Some(&mut owner),
         )
         .unwrap();
+        let first_path = first.record_path().to_path_buf();
         let original = fs::read(first.record_path()).unwrap();
+        first.cleanup().unwrap();
 
         let error = publish_ui_child(
             &context,
             UiChildSource::DeferredBootstrap,
             UiHost::Split { wait_channel: "replacement".into() },
-            Some(&owner),
+            Some(&mut owner),
         )
         .unwrap_err();
 
         assert!(error.to_string().contains("already exists"), "{error:#}");
-        assert_eq!(fs::read(first.record_path()).unwrap(), original);
+        assert_eq!(fs::read(first_path).unwrap(), original);
         owner.cleanup().unwrap();
     }
 
@@ -860,6 +928,33 @@ mod tests {
     }
 
     #[test]
+    fn direct_ui_session_is_preserved_until_terminal_completion_is_confirmed() {
+        let dir = tempdir().unwrap();
+        let mut unknown =
+            publish_ui_child(&context(dir.path()), UiChildSource::Direct, UiHost::Popup, None)
+                .unwrap();
+        let unknown_session = unknown.session_dir().to_path_buf();
+        unknown.child_launched();
+        unknown.cleanup().unwrap();
+        assert!(
+            unknown_session.exists(),
+            "a launched child with unknown completion must retain its session"
+        );
+
+        let mut confirmed =
+            publish_ui_child(&context(dir.path()), UiChildSource::Direct, UiHost::Popup, None)
+                .unwrap();
+        let confirmed_session = confirmed.session_dir().to_path_buf();
+        confirmed.child_launched();
+        confirmed.terminal_completion_confirmed();
+        confirmed.cleanup().unwrap();
+        assert!(
+            !confirmed_session.exists(),
+            "a child with confirmed terminal completion must release its session"
+        );
+    }
+
+    #[test]
     fn missing_corrupt_and_unsupported_child_results_are_operation_errors() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
@@ -872,7 +967,7 @@ mod tests {
         let corrupt =
             publish_ui_child(&context, UiChildSource::Direct, UiHost::Popup, None).unwrap();
         fs::write(corrupt.result_path(), b"not json").unwrap();
-        let claimed_path = corrupt.session_dir.join(CLAIMED_CHILD_RESULT_RECORD);
+        let claimed_path = corrupt.session_dir().join(CLAIMED_CHILD_RESULT_RECORD);
         let error = consume_child_result(corrupt.result_path()).unwrap_err();
         assert!(error.to_string().contains("malformed child result"), "{error:#}");
         assert!(claimed_path.is_file(), "validation must happen after atomic claim");
