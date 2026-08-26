@@ -37,3 +37,24 @@ fn init_help_omits_removed_tpm_flag() {
         .success()
         .stdout(predicate::str::contains("--tpm").not());
 }
+
+#[test]
+fn init_rejects_retired_internal_transport_flags() {
+    for flag in [
+        "--bootstrap",
+        "--ui-child",
+        "--wait-channel",
+        "--config-path",
+        "--tpm-config-path",
+        "--no-tpm-config",
+        "--data-root",
+        "--state-root",
+    ] {
+        Command::cargo_bin("tmup")
+            .unwrap()
+            .args(["init", flag])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("unexpected argument"));
+    }
+}

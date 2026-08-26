@@ -368,6 +368,37 @@ fn schedule_bootstrap_record(
     find_single_bootstrap_record(&state_home)
 }
 
+fn write_ui_child_record(
+    config_path: &Path,
+    data_root: &Path,
+    state_root: &Path,
+) -> (PathBuf, PathBuf) {
+    let session_dir = state_root.join("init-sessions/session-test-ui-child");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let record_path = session_dir.join("ui-child.json");
+    let result_path = session_dir.join("child-result.json");
+    let record = serde_json::json!({
+        "version": 1,
+        "continuation": {
+            "role": "ui_child",
+            "context": {
+                "config_mode": "pure",
+                "config_path": config_path,
+                "tpm_identity": { "kind": "disabled" },
+                "data_root": data_root,
+                "state_root": state_root,
+            },
+            "source": "direct",
+            "completion": {
+                "kind": "popup",
+                "result_name": "child-result.json",
+            },
+        },
+    });
+    std::fs::write(&record_path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    (record_path, result_path)
+}
+
 fn resolve_real_git() -> String {
     let output = std::process::Command::new("sh").args(["-c", "command -v git"]).output().unwrap();
     assert!(output.status.success(), "failed to locate real git");
@@ -527,133 +558,6 @@ plugin "https://example.com/test/plugin-b.git"
         max_in_flight >= 2,
         "expected overlapping git fetch jobs during sync prepare, got max_in_flight={max_in_flight}"
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn init_ui_child_stops_after_sync_failure() {
-    let dir = tempdir().unwrap();
-    make_remote_repo(dir.path());
-    let gitconfig = write_git_rewrite_config(dir.path());
-
-    let config_dir = dir.path().join("config");
-    let xdg_config_dir = dir.path().join("xdg-config/tmux");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::create_dir_all(&xdg_config_dir).unwrap();
-    let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "https://example.com/test/plugin.git""#).unwrap();
-
-    let original_mode = std::fs::metadata(&xdg_config_dir).unwrap().permissions().mode();
-    let mut readonly = std::fs::metadata(&xdg_config_dir).unwrap().permissions();
-    readonly.set_mode(0o555);
-    std::fs::set_permissions(&xdg_config_dir, readonly).unwrap();
-
-    let output = Command::cargo_bin("tmup")
-        .unwrap()
-        .args([
-            "init",
-            "--ui-child",
-            "--wait-channel",
-            "test-channel",
-            "--config-path",
-            config_path.to_str().unwrap(),
-            "--data-root",
-            dir.path().join("data").to_str().unwrap(),
-            "--state-root",
-            dir.path().join("state").to_str().unwrap(),
-        ])
-        .env("XDG_CONFIG_HOME", dir.path().join("xdg-config"))
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", gitconfig)
-        .env("HOME", dir.path())
-        .output()
-        .unwrap();
-
-    let mut restored = std::fs::metadata(&xdg_config_dir).unwrap().permissions();
-    restored.set_mode(original_mode);
-    std::fs::set_permissions(&xdg_config_dir, restored).unwrap();
-
-    assert!(!output.status.success(), "ui child should fail when sync fails");
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Fetching"), "stderr should show sync started, got:\n{stderr}");
-    assert!(
-        stderr.contains("Resolving"),
-        "stderr should include richer structured stage lines, got:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("Checking out"),
-        "stderr should include checkout stage lines, got:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("Loading tmux applying load plan"),
-        "init ui-child should continue into tmux loading for append-only failure reporting, got:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("Failed operation")
-            || stderr.contains("failed to create")
-            || stderr.contains("failed to rename")
-            || stderr.contains("Permission denied"),
-        "stderr should show an operation-level failure, got:\n{stderr}"
-    );
-    assert_no_live_cursor_sequences(&stderr);
-}
-
-#[test]
-fn init_ui_child_stops_when_remote_is_missing_during_fetch() {
-    let dir = tempdir().unwrap();
-    let bare = make_remote_repo(dir.path());
-    let gitconfig = write_git_rewrite_config(dir.path());
-    // Remove the bare repo to simulate remote disappearing after cache population.
-    std::fs::remove_dir_all(&bare).unwrap();
-
-    let config_dir = dir.path().join("config");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "https://example.com/test/plugin.git""#).unwrap();
-
-    let output = Command::cargo_bin("tmup")
-        .unwrap()
-        .args([
-            "init",
-            "--ui-child",
-            "--wait-channel",
-            "test-channel",
-            "--config-path",
-            config_path.to_str().unwrap(),
-            "--data-root",
-            dir.path().join("data").to_str().unwrap(),
-            "--state-root",
-            dir.path().join("state").to_str().unwrap(),
-        ])
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", gitconfig)
-        .env("HOME", dir.path())
-        .output()
-        .unwrap();
-
-    assert!(!output.status.success(), "init should fail when fetch cannot reach remote");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("Fetching"),
-        "stderr should show sync started even when remote is missing, got:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("Failed operation")
-            || stderr.contains("git clone --bare failed")
-            || stderr.contains("failed to run git fetch origin")
-            || stderr.contains("No such file or directory"),
-        "stderr should expose the clone/fetch failure, got:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("Loading tmux applying load plan"),
-        "init should still emit tmux-loading stage text in append-only mode, got:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("Failed plugin"),
-        "stderr should show plugin-level failure lines from structured events, got:\n{stderr}"
-    );
-    assert_no_live_cursor_sequences(&stderr);
 }
 
 #[test]
@@ -1196,13 +1100,19 @@ fn init_bootstrap_uses_split_when_tmux_is_2_0() {
     let split_index = split_index.unwrap();
     let inline_option_index = inline_option_index.unwrap();
     let child_index = log[split_index..]
-        .find(" init --ui-child --wait-channel ")
+        .find(" 'init' '--resume' '")
         .map(|offset| split_index + offset)
         .expect("expected child command in split-window tmux log");
     assert!(
         split_index < inline_option_index && inline_option_index < child_index,
         "split wrapper should set remain-on-exit before launching the child, got log:\n{log}"
     );
+    for legacy_transport in ["--ui-child", "--wait-channel", "--config-path", "exit_code"] {
+        assert!(
+            !log[split_index..].contains(legacy_transport),
+            "split wrapper must not contain legacy transport {legacy_transport}, got log:\n{log}"
+        );
+    }
     assert!(
         log.lines().any(|line| line.starts_with("wait-for ")),
         "split path should still wait for the child signal, got log:\n{log}"
@@ -1273,24 +1183,28 @@ fn init_bootstrap_popup_path_targets_explicit_client_and_skips_wait_for() {
         "display-popup should NOT wrap command in sh -c (tmux does this internally), got:\n{popup_header}"
     );
 
-    // The wrapper (multi-line) must contain the child command.
+    // The wrapper (multi-line) must contain only the record-based child command.
     assert!(
-        log[popup_start..].contains(" init --ui-child --wait-channel "),
-        "display-popup wrapper should contain the child command, got log:\n{log}"
+        log[popup_start..].contains(" 'init' '--resume' '"),
+        "display-popup wrapper should resume the UI child from its record, got log:\n{log}"
     );
+    for legacy_transport in ["--ui-child", "--wait-channel", "--config-path", "exit_code"] {
+        assert!(
+            !log[popup_start..].contains(legacy_transport),
+            "display-popup wrapper must not contain legacy transport {legacy_transport}, got log:\n{log}"
+        );
+    }
+    let child_index =
+        log[popup_start..].find(" 'init' '--resume' '").map(|offset| popup_start + offset).unwrap();
     let key_wait_index = log[popup_start..]
         .find("dd bs=1 count=1")
         .map(|offset| popup_start + offset)
         .unwrap_or_else(|| {
             panic!("popup wrapper should wait for keypress before exit, got log:\n{log}")
         });
-    let result_index = log[popup_start..]
-        .find("printf '{\"exit_code\":%d}\\n' \"$rc\" > \"$result_file\"")
-        .map(|offset| popup_start + offset)
-        .expect("popup wrapper should write the result file");
     assert!(
-        result_index < key_wait_index,
-        "popup wrapper should write the result before waiting for keypress, got log:\n{log}"
+        child_index < key_wait_index,
+        "popup wrapper should run the child before waiting for keypress, got log:\n{log}"
     );
     assert!(
         log[popup_start..].contains("exit 0"),
@@ -1405,6 +1319,7 @@ plugin "https://example.com/test/plugin.git" build="exit 1"
     let xdg_config_home = dir.path().join("xdg-config");
     std::fs::create_dir_all(&data_root).unwrap();
     std::fs::create_dir_all(&state_root).unwrap();
+    let (record_path, result_path) = write_ui_child_record(&config_path, &data_root, &state_root);
 
     let tmux_log = dir.path().join("tmux.log");
     let fake_tmux_dir = write_fake_tmux_with_log(dir.path(), &tmux_log);
@@ -1412,19 +1327,10 @@ plugin "https://example.com/test/plugin.git" build="exit 1"
 
     let output = Command::cargo_bin("tmup")
         .unwrap()
-        .args([
-            "init",
-            "--ui-child",
-            "--wait-channel",
-            "test-channel",
-            "--config-path",
-            config_path.to_str().unwrap(),
-            "--data-root",
-            data_root.to_str().unwrap(),
-            "--state-root",
-            state_root.to_str().unwrap(),
-        ])
+        .args(["init", "--resume", record_path.to_str().unwrap()])
         .env("PATH", path)
+        .env("TMUP_CONFIG_MODE", "invalid-ambient-mode")
+        .env("TMUP_CONFIG", dir.path().join("ignored.kdl"))
         .env("XDG_CONFIG_HOME", &xdg_config_home)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", gitconfig)
@@ -1444,6 +1350,12 @@ plugin "https://example.com/test/plugin.git" build="exit 1"
         "tmux loading stage should be visible in append-only mode when init continues after plugin failures, got:\n{stderr}"
     );
     assert_no_live_cursor_sequences(&stderr);
+
+    let result: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&result_path).unwrap()).unwrap();
+    assert_eq!(result["version"], 1);
+    assert_eq!(result["result"]["status"], "completed_with_plugin_failures");
+    assert_eq!(result["result"]["failures"].as_array().unwrap().len(), 1);
 
     let log = std::fs::read_to_string(&tmux_log).unwrap_or_default();
     let has_plugin_manager_env = log

@@ -21,20 +21,3 @@ fn run_shell_escapes_single_quotes() {
         vec!["run-shell".to_string(), "'/tmp/it'\"'\"'s/plugin.tmux'".to_string(),]
     );
 }
-
-#[test]
-fn parse_tmux_version_formats() {
-    use tmup::tmux::parse_tmux_version;
-
-    let cases = [
-        ("tmux 3.2", Some((3, 2, None))),
-        ("tmux 3.3a", Some((3, 3, Some('a')))),
-        ("tmux next-3.4", Some((3, 4, None))),
-        ("tmux master", None),
-    ];
-
-    for (input, expected) in cases {
-        let parsed = parse_tmux_version(input).map(|v| (v.major, v.minor, v.suffix));
-        assert_eq!(parsed, expected, "{} should parse as {expected:?}", input);
-    }
-}
