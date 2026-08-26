@@ -65,6 +65,10 @@ PRs should:
 
 ## Agent skills
 
+### Disabled plugins
+
+Treat the `superpowers` plugin as disabled in this repository. Do not invoke, read, or follow any `superpowers:*` skill; use other applicable skills instead.
+
 ### Issue tracker
 
 Issues and specs are tracked in GitHub Issues. See `docs/agents/issue-tracker.md`.
