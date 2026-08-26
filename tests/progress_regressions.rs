@@ -332,6 +332,42 @@ fn find_sync_log(logs_root: &Path) -> PathBuf {
         .expect("expected a sync log file")
 }
 
+fn find_single_bootstrap_record(state_home: &Path) -> PathBuf {
+    let sessions_root = state_home.join("tmup/init-sessions");
+    let records = std::fs::read_dir(&sessions_root)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", sessions_root.display()))
+        .map(|entry| entry.unwrap().path().join("bootstrap.json"))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 1, "expected exactly one published bootstrap record");
+    records.into_iter().next().unwrap()
+}
+
+fn schedule_bootstrap_record(
+    root: &Path,
+    config_path: &Path,
+    config_mode: Option<&str>,
+) -> PathBuf {
+    let state_home = root.join("state");
+    let schedule_log = root.join("schedule-tmux.log");
+    let fake_tmux_dir = write_fake_tmux_with_log(root, &schedule_log);
+    let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
+    let mut command = Command::cargo_bin("tmup").unwrap();
+    command
+        .arg("init")
+        .env("TMUP_CONFIG", config_path)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_STATE_HOME", &state_home)
+        .env("HOME", root)
+        .env("PATH", path);
+    if let Some(config_mode) = config_mode {
+        command.env("TMUP_CONFIG_MODE", config_mode);
+    }
+    command.assert().success();
+    find_single_bootstrap_record(&state_home)
+}
+
 fn resolve_real_git() -> String {
     let output = std::process::Command::new("sh").args(["-c", "command -v git"]).output().unwrap();
     assert!(output.status.success(), "failed to locate real git");
@@ -632,13 +668,14 @@ fn init_parent_schedules_bootstrap_in_background() {
     let fake_tmux_dir = write_fake_tmux_with_log(dir.path(), &tmux_log);
     let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
 
+    let state_home = dir.path().join("state");
     let output = Command::cargo_bin("tmup")
         .unwrap()
         .arg("init")
         .env("TMUP_CONFIG", &config_path)
         .env("XDG_CONFIG_HOME", dir.path().join("config"))
         .env("XDG_DATA_HOME", dir.path().join("data"))
-        .env("XDG_STATE_HOME", dir.path().join("state"))
+        .env("XDG_STATE_HOME", &state_home)
         .env("PATH", path)
         .output()
         .unwrap();
@@ -650,10 +687,30 @@ fn init_parent_schedules_bootstrap_in_background() {
         log.contains("run-shell -b "),
         "expected init parent to schedule bootstrap with run-shell -b, got log:\n{log}"
     );
+    let record_path = find_single_bootstrap_record(&state_home);
+    assert!(record_path.is_absolute(), "resume record path must be absolute");
     assert!(
-        log.contains("'init' '--bootstrap'"),
-        "expected scheduled bootstrap command in tmux log, got log:\n{log}"
+        log.contains(&format!("'init' '--resume' '{}'", record_path.display())),
+        "expected scheduled bootstrap command to contain only the resume record, got log:\n{log}"
     );
+    for legacy_argument in [
+        "--bootstrap",
+        "--config-path",
+        "--tpm-config-path",
+        "--no-tpm-config",
+        "--data-root",
+        "--state-root",
+    ] {
+        assert!(
+            !log.contains(legacy_argument),
+            "deferred bootstrap must not use legacy argument {legacy_argument}, got log:\n{log}"
+        );
+    }
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    assert_eq!(record["version"], 1);
+    assert_eq!(record["continuation"]["role"], "bootstrap");
+    assert_eq!(record["continuation"]["context"]["config_path"], config_path.to_str().unwrap());
     assert!(
         !log.contains("display-popup "),
         "init parent should not open popup synchronously anymore, got log:\n{log}"
@@ -662,6 +719,49 @@ fn init_parent_schedules_bootstrap_in_background() {
         !log.contains("split-window "),
         "init parent should not open split synchronously anymore, got log:\n{log}"
     );
+}
+
+#[test]
+fn init_resume_uses_recorded_sources_and_cleans_its_session() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("config/tmux");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_path = config_dir.join("tmup.kdl");
+    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    let state_home = dir.path().join("state");
+    let tmux_log = dir.path().join("tmux.log");
+    let fake_tmux_dir = write_fake_tmux_with_log(dir.path(), &tmux_log);
+    let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
+
+    Command::cargo_bin("tmup")
+        .unwrap()
+        .arg("init")
+        .env("TMUP_CONFIG", &config_path)
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("XDG_STATE_HOME", &state_home)
+        .env("PATH", &path)
+        .assert()
+        .success();
+    let record_path = find_single_bootstrap_record(&state_home);
+    let session_dir = record_path.parent().unwrap().to_path_buf();
+
+    std::fs::write(&config_path, "").unwrap();
+    let bad_config = dir.path().join("bad.kdl");
+    std::fs::write(&bad_config, "plugin {\n").unwrap();
+
+    Command::cargo_bin("tmup")
+        .unwrap()
+        .args(["init", "--resume", record_path.to_str().unwrap()])
+        .env("TMUP_CONFIG_MODE", "not-a-mode")
+        .env("TMUP_CONFIG", &bad_config)
+        .env("PATH", path)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("TMUP_CONFIG_MODE").not())
+        .stderr(predicate::str::contains("failed to parse KDL").not());
+
+    assert!(!session_dir.exists(), "a normally completed resume must clean its own session");
 }
 
 #[test]
@@ -679,24 +779,24 @@ fn init_parent_bootstrap_uses_resolved_tmup_config_path() {
     let fake_tmux_dir = write_fake_tmux_with_log(dir.path(), &tmux_log);
     let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
 
+    let state_home = dir.path().join("state");
     let output = Command::cargo_bin("tmup")
         .unwrap()
         .arg("init")
         .env("TMUP_CONFIG", &override_config)
         .env("XDG_CONFIG_HOME", dir.path().join("config"))
         .env("XDG_DATA_HOME", dir.path().join("data"))
-        .env("XDG_STATE_HOME", dir.path().join("state"))
+        .env("XDG_STATE_HOME", &state_home)
         .env("PATH", path)
         .output()
         .unwrap();
 
     assert!(output.status.success(), "init should succeed after scheduling bootstrap");
 
-    let log = std::fs::read_to_string(&tmux_log).unwrap_or_default();
-    assert!(
-        log.contains(&format!("'{}'", override_config.display())),
-        "expected scheduled bootstrap command to use the resolved TMUP_CONFIG path, got log:\n{log}"
-    );
+    let record_path = find_single_bootstrap_record(&state_home);
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(record_path).unwrap()).unwrap();
+    assert_eq!(record["continuation"]["context"]["config_path"], override_config.to_str().unwrap());
 }
 
 #[test]
@@ -714,13 +814,14 @@ fn init_parent_bootstrap_uses_resolved_tpm_config_path_in_mixed_mode() {
     let fake_tmux_dir = write_fake_tmux_with_log(dir.path(), &tmux_log);
     let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
 
+    let state_home = dir.path().join("state");
     let output = Command::cargo_bin("tmup")
         .unwrap()
         .arg("init")
         .env("TMUP_CONFIG_MODE", "mixed")
         .env("XDG_CONFIG_HOME", &config_home)
         .env("XDG_DATA_HOME", dir.path().join("data"))
-        .env("XDG_STATE_HOME", dir.path().join("state"))
+        .env("XDG_STATE_HOME", &state_home)
         .env("HOME", dir.path())
         .env("PATH", path)
         .output()
@@ -728,14 +829,14 @@ fn init_parent_bootstrap_uses_resolved_tpm_config_path_in_mixed_mode() {
 
     assert!(output.status.success(), "init should succeed after scheduling bootstrap");
 
-    let log = std::fs::read_to_string(&tmux_log).unwrap_or_default();
-    assert!(
-        log.contains(&format!("'{}'", tpm_config.display())),
-        "expected scheduled bootstrap command to use the resolved TPM config path, got log:\n{log}"
-    );
-    assert!(
-        log.contains("TMUP_CONFIG_MODE='mixed'"),
-        "expected scheduled bootstrap command to propagate mixed mode via environment, got log:\n{log}"
+    let record_path = find_single_bootstrap_record(&state_home);
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(record_path).unwrap()).unwrap();
+    assert_eq!(record["continuation"]["context"]["config_mode"], "mixed");
+    assert_eq!(record["continuation"]["context"]["tpm_identity"]["kind"], "path");
+    assert_eq!(
+        record["continuation"]["context"]["tpm_identity"]["path"],
+        tpm_config.to_str().unwrap()
     );
 }
 
@@ -752,13 +853,14 @@ fn init_parent_bootstrap_marks_absent_tpm_config_as_resolved_none() {
     let fake_tmux_dir = write_fake_tmux_with_log(dir.path(), &tmux_log);
     let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
 
+    let state_home = dir.path().join("state");
     let output = Command::cargo_bin("tmup")
         .unwrap()
         .arg("init")
         .env("TMUP_CONFIG_MODE", "mixed")
         .env("XDG_CONFIG_HOME", &config_home)
         .env("XDG_DATA_HOME", dir.path().join("data"))
-        .env("XDG_STATE_HOME", dir.path().join("state"))
+        .env("XDG_STATE_HOME", &state_home)
         .env("HOME", dir.path())
         .env("PATH", path)
         .output()
@@ -766,48 +868,12 @@ fn init_parent_bootstrap_marks_absent_tpm_config_as_resolved_none() {
 
     assert!(output.status.success(), "init should succeed after scheduling bootstrap");
 
-    let log = std::fs::read_to_string(&tmux_log).unwrap_or_default();
-    assert!(
-        log.contains("'--no-tpm-config'"),
-        "expected scheduled bootstrap command to preserve a resolved missing TPM config, got log:\n{log}"
-    );
-    assert!(
-        !log.contains("'--tpm-config-path'"),
-        "expected scheduled bootstrap command not to fabricate a TPM config path, got log:\n{log}"
-    );
-}
-
-#[test]
-fn init_bootstrap_prefers_explicit_config_path_over_tmup_config_env() {
-    let dir = tempdir().unwrap();
-    let good_config = dir.path().join("good/good.kdl");
-    let bad_config = dir.path().join("bad/bad.kdl");
-    std::fs::create_dir_all(good_config.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(bad_config.parent().unwrap()).unwrap();
-    std::fs::write(&good_config, "").unwrap();
-    std::fs::write(&bad_config, "plugin {\n").unwrap();
-
-    let tmux_log = dir.path().join("tmux.log");
-    let fake_tmux_dir = write_fake_tmux_with_log(dir.path(), &tmux_log);
-    let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
-
-    Command::cargo_bin("tmup")
-        .unwrap()
-        .args([
-            "init",
-            "--bootstrap",
-            "--config-path",
-            good_config.to_str().unwrap(),
-            "--data-root",
-            dir.path().join("data").to_str().unwrap(),
-            "--state-root",
-            dir.path().join("state").to_str().unwrap(),
-        ])
-        .env("TMUP_CONFIG", &bad_config)
-        .env("PATH", path)
-        .assert()
-        .success()
-        .stderr(predicates::str::contains("failed to parse KDL").not());
+    let record_path = find_single_bootstrap_record(&state_home);
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(record_path).unwrap()).unwrap();
+    assert_eq!(record["continuation"]["context"]["config_mode"], "mixed");
+    assert_eq!(record["continuation"]["context"]["tpm_identity"]["kind"], "absent");
+    assert!(record["continuation"]["context"]["tpm_identity"].get("path").is_none());
 }
 
 #[test]
@@ -820,25 +886,32 @@ fn init_bootstrap_mixed_uses_tpm_plugins_when_tmup_kdl_is_missing() {
     let tpm_config = config_dir.join("tmux.conf");
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(&tpm_config, "set -g @plugin 'https://example.com/test/plugin.git'\n").unwrap();
-    let tmux_log = dir.path().join("tmux.log");
-    let fake_tmux_dir = write_fake_tmux_with_log(dir.path(), &tmux_log);
-    let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
+    let state_home = dir.path().join("state");
+    let schedule_log = dir.path().join("schedule-tmux.log");
+    let schedule_tmux_dir = write_fake_tmux_with_log(dir.path(), &schedule_log);
+    let schedule_path =
+        format!("{}:{}", schedule_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
 
     Command::cargo_bin("tmup")
         .unwrap()
-        .args([
-            "init",
-            "--bootstrap",
-            "--config-path",
-            tmup_config.to_str().unwrap(),
-            "--tpm-config-path",
-            tpm_config.to_str().unwrap(),
-            "--data-root",
-            dir.path().join("data").to_str().unwrap(),
-            "--state-root",
-            dir.path().join("state").to_str().unwrap(),
-        ])
+        .arg("init")
         .env("TMUP_CONFIG_MODE", "mixed")
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("XDG_STATE_HOME", &state_home)
+        .env("HOME", dir.path())
+        .env("PATH", schedule_path)
+        .assert()
+        .success();
+    let record_path = find_single_bootstrap_record(&state_home);
+
+    let tmux_log = dir.path().join("tmux.log");
+    let fake_tmux_dir = write_fake_tmux_versioned_with_log(dir.path(), &tmux_log, "tmux 1.9", 1, 1);
+    let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
+    Command::cargo_bin("tmup")
+        .unwrap()
+        .args(["init", "--resume", record_path.to_str().unwrap()])
+        .env("TMUP_CONFIG_MODE", "invalid-after-publication")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", &gitconfig)
         .env("HOME", dir.path())
@@ -855,39 +928,24 @@ fn init_bootstrap_mixed_uses_tpm_plugins_when_tmup_kdl_is_missing() {
 #[test]
 fn init_bootstrap_no_tpm_config_disables_rediscovery() {
     let dir = tempdir().unwrap();
-    let _bare = make_remote_repo(dir.path());
-    let gitconfig = write_git_rewrite_config(dir.path());
     let config_home = dir.path().join("config");
     let config_dir = config_home.join("tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let tmup_config = config_dir.join("tmup.kdl");
     let tpm_config = config_dir.join("tmux.conf");
+    std::fs::write(&tmup_config, r#"plugin "user/repo""#).unwrap();
+    let record_path = schedule_bootstrap_record(dir.path(), &tmup_config, Some("mixed"));
+
     std::fs::write(&tmup_config, "").unwrap();
     std::fs::write(&tpm_config, "set -g @plugin 'https://example.com/test/plugin.git'\n").unwrap();
     let tmux_log = dir.path().join("tmux.log");
-    let fake_tmux_dir = write_fake_tmux_with_log(dir.path(), &tmux_log);
+    let fake_tmux_dir = write_fake_tmux_versioned_with_log(dir.path(), &tmux_log, "tmux 1.9", 1, 1);
     let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
 
     Command::cargo_bin("tmup")
         .unwrap()
-        .args([
-            "init",
-            "--bootstrap",
-            "--config-path",
-            tmup_config.to_str().unwrap(),
-            "--no-tpm-config",
-            "--data-root",
-            dir.path().join("data").to_str().unwrap(),
-            "--state-root",
-            dir.path().join("state").to_str().unwrap(),
-        ])
-        .env("TMUP_CONFIG_MODE", "mixed")
-        .env("XDG_CONFIG_HOME", &config_home)
-        .env("XDG_DATA_HOME", dir.path().join("data"))
-        .env("XDG_STATE_HOME", dir.path().join("state"))
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", &gitconfig)
-        .env("HOME", dir.path())
+        .args(["init", "--resume", record_path.to_str().unwrap()])
+        .env("TMUP_CONFIG_MODE", "invalid-after-publication")
         .env("PATH", path)
         .assert()
         .success();
@@ -1093,6 +1151,7 @@ fn init_bootstrap_uses_split_when_tmux_is_2_0() {
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
     std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    let record_path = schedule_bootstrap_record(dir.path(), &config_path, None);
 
     let tmux_log = dir.path().join("tmux.log");
     let fake_tmux_dir = write_fake_tmux_versioned_with_log(dir.path(), &tmux_log, "tmux 2.0", 1, 0);
@@ -1100,16 +1159,7 @@ fn init_bootstrap_uses_split_when_tmux_is_2_0() {
 
     let output = Command::cargo_bin("tmup")
         .unwrap()
-        .args([
-            "init",
-            "--bootstrap",
-            "--config-path",
-            config_path.to_str().unwrap(),
-            "--data-root",
-            dir.path().join("data").to_str().unwrap(),
-            "--state-root",
-            dir.path().join("state").to_str().unwrap(),
-        ])
+        .args(["init", "--resume", record_path.to_str().unwrap()])
         .env("TMUP_CONFIG", &config_path)
         .env("XDG_CONFIG_HOME", dir.path().join("config"))
         .env("XDG_DATA_HOME", dir.path().join("data"))
@@ -1176,6 +1226,7 @@ fn init_bootstrap_popup_path_targets_explicit_client_and_skips_wait_for() {
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
     std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    let record_path = schedule_bootstrap_record(dir.path(), &config_path, None);
 
     let tmux_log = dir.path().join("tmux.log");
     let fake_tmux_dir = write_fake_tmux_bootstrap_with_log(dir.path(), &tmux_log, 0, 1);
@@ -1183,16 +1234,7 @@ fn init_bootstrap_popup_path_targets_explicit_client_and_skips_wait_for() {
 
     let output = Command::cargo_bin("tmup")
         .unwrap()
-        .args([
-            "init",
-            "--bootstrap",
-            "--config-path",
-            config_path.to_str().unwrap(),
-            "--data-root",
-            dir.path().join("data").to_str().unwrap(),
-            "--state-root",
-            dir.path().join("state").to_str().unwrap(),
-        ])
+        .args(["init", "--resume", record_path.to_str().unwrap()])
         .env("TMUP_CONFIG", &config_path)
         .env("XDG_CONFIG_HOME", dir.path().join("config"))
         .env("XDG_DATA_HOME", dir.path().join("data"))
@@ -1265,6 +1307,7 @@ fn init_bootstrap_retries_probe_until_target_is_ready() {
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
     std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    let record_path = schedule_bootstrap_record(dir.path(), &config_path, None);
 
     let tmux_log = dir.path().join("tmux.log");
     let fake_tmux_dir = write_fake_tmux_retry_probe_with_log(dir.path(), &tmux_log);
@@ -1272,16 +1315,7 @@ fn init_bootstrap_retries_probe_until_target_is_ready() {
 
     let output = Command::cargo_bin("tmup")
         .unwrap()
-        .args([
-            "init",
-            "--bootstrap",
-            "--config-path",
-            config_path.to_str().unwrap(),
-            "--data-root",
-            dir.path().join("data").to_str().unwrap(),
-            "--state-root",
-            dir.path().join("state").to_str().unwrap(),
-        ])
+        .args(["init", "--resume", record_path.to_str().unwrap()])
         .env("TMUP_CONFIG", &config_path)
         .env("XDG_CONFIG_HOME", dir.path().join("config"))
         .env("XDG_DATA_HOME", dir.path().join("data"))
@@ -1314,6 +1348,7 @@ fn init_bootstrap_keeps_probing_long_enough_for_late_target() {
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
     std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    let record_path = schedule_bootstrap_record(dir.path(), &config_path, None);
 
     let tmux_log = dir.path().join("tmux.log");
     let fake_tmux_dir =
@@ -1322,16 +1357,7 @@ fn init_bootstrap_keeps_probing_long_enough_for_late_target() {
 
     let output = Command::cargo_bin("tmup")
         .unwrap()
-        .args([
-            "init",
-            "--bootstrap",
-            "--config-path",
-            config_path.to_str().unwrap(),
-            "--data-root",
-            dir.path().join("data").to_str().unwrap(),
-            "--state-root",
-            dir.path().join("state").to_str().unwrap(),
-        ])
+        .args(["init", "--resume", record_path.to_str().unwrap()])
         .env("TMUP_CONFIG", &config_path)
         .env("XDG_CONFIG_HOME", dir.path().join("config"))
         .env("XDG_DATA_HOME", dir.path().join("data"))
