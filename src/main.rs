@@ -61,18 +61,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let result = match resolve_requested_config_mode() {
-        Ok(requested_config_mode) => match cli.command {
-            Commands::Init(invocation) => invocation.execute(requested_config_mode).await,
-            Commands::Install { id } => run_install(id, requested_config_mode).await,
-            Commands::Sync { id } => run_sync(id, requested_config_mode).await,
-            Commands::Update { id } => run_update(id, requested_config_mode).await,
-            Commands::Restore { id } => run_restore(id, requested_config_mode).await,
-            Commands::Clean => run_clean(requested_config_mode).await,
-            Commands::List { verbose } => run_list(verbose, requested_config_mode),
-        },
-        Err(e) => Err(e),
-    };
+    let result = dispatch(cli.command).await;
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -83,6 +72,18 @@ async fn main() -> ExitCode {
             }
             ExitCode::FAILURE
         }
+    }
+}
+
+async fn dispatch(command: Commands) -> Result<()> {
+    match command {
+        Commands::Init(invocation) => invocation.execute().await,
+        Commands::Install { id } => run_install(id, resolve_requested_config_mode()?).await,
+        Commands::Sync { id } => run_sync(id, resolve_requested_config_mode()?).await,
+        Commands::Update { id } => run_update(id, resolve_requested_config_mode()?).await,
+        Commands::Restore { id } => run_restore(id, resolve_requested_config_mode()?).await,
+        Commands::Clean => run_clean(resolve_requested_config_mode()?).await,
+        Commands::List { verbose } => run_list(verbose, resolve_requested_config_mode()?),
     }
 }
 

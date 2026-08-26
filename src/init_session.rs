@@ -11,6 +11,8 @@ use tmup::sync::{self, SyncMode, SyncPolicy};
 use tmup::tmux::TmuxCommand;
 use tmup::{loader, progress};
 
+mod record;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResolvedTpmIdentity {
     Disabled,
@@ -77,7 +79,7 @@ trait TmuxAdapter {
     fn ui_available(&mut self) -> bool;
     fn current_host_available(&mut self) -> bool;
     fn wait_for_host(&mut self) -> bool;
-    fn defer(&mut self, continuation: Continuation) -> Result<()>;
+    fn defer(&mut self, resume_path: &Path) -> Result<()>;
     fn host_child(&mut self, continuation: Continuation) -> Result<()>;
     fn display_fallback(&mut self, message: &str);
     fn display_waiting(&mut self);
@@ -120,6 +122,21 @@ pub(crate) async fn run(invocation: PublicInvocation) -> Result<Outcome> {
 pub(crate) async fn resume(continuation: Continuation) -> Result<Outcome> {
     let mut tmux = ProductionTmux::new();
     resume_with_adapter(continuation, &mut tmux).await
+}
+
+async fn resume_bootstrap_record(path: &Path) -> Result<Outcome> {
+    let claimed = record::claim_bootstrap(path)?;
+    let (context, owner) = claimed.into_parts();
+    match resume(Continuation::DeferredBootstrap(context)).await {
+        Ok(outcome) => {
+            owner.cleanup()?;
+            Ok(outcome)
+        }
+        Err(error) => {
+            let _ = owner.cleanup();
+            Err(error)
+        }
+    }
 }
 
 fn finish(outcome: Outcome, failures_already_reported: bool) -> Result<()> {
@@ -197,9 +214,11 @@ async fn run_loaded_with_adapter(
         tmux.host_child(Continuation::HostedChild(context))?;
         return Ok(Outcome::Completed);
     }
-    if tmux.defer(Continuation::DeferredBootstrap(context.clone())).is_ok() {
+    let published = record::publish_bootstrap(&context)?;
+    if tmux.defer(published.record_path()).is_ok() {
         return Ok(Outcome::Deferred);
     }
+    let _ = published.cleanup();
     tmux.display_fallback("tmup: unable to schedule background bootstrap, running inline");
     execute_inline(&context, &loaded.warnings, LockWaitMessage::Silent, tmux).await
 }
@@ -315,8 +334,21 @@ fn emit_warnings(preview_warnings: &[String], execution_warnings: &[String]) {
 
 #[derive(Debug, Args)]
 pub(crate) struct ProductionInitArgs {
-    #[arg(hide = true, long)]
-    bootstrap: bool,
+    #[arg(
+        hide = true,
+        long,
+        value_name = "PATH",
+        conflicts_with_all = [
+            "ui_child",
+            "wait_channel",
+            "config_path",
+            "tpm_config_path",
+            "no_tpm_config",
+            "data_root",
+            "state_root"
+        ]
+    )]
+    resume: Option<PathBuf>,
     #[arg(hide = true, long)]
     ui_child: bool,
     #[arg(hide = true, long)]
@@ -334,7 +366,11 @@ pub(crate) struct ProductionInitArgs {
 }
 
 impl ProductionInitArgs {
-    pub(crate) async fn execute(self, config_mode: ConfigMode) -> Result<()> {
+    pub(crate) async fn execute(self) -> Result<()> {
+        if let Some(resume_path) = self.resume.as_deref() {
+            return finish(resume_bootstrap_record(resume_path).await?, false);
+        }
+        let config_mode = super::resolve_requested_config_mode()?;
         match self.into_continuation(config_mode)? {
             Some(continuation) => {
                 let is_hosted_child = matches!(continuation, Continuation::HostedChild(_));
@@ -348,11 +384,6 @@ impl ProductionInitArgs {
         if self.ui_child {
             self.wait_channel.as_ref().context("--ui-child requires --wait-channel")?;
             return Ok(Some(Continuation::HostedChild(self.context(config_mode, "--ui-child")?)));
-        }
-        if self.bootstrap {
-            return Ok(Some(Continuation::DeferredBootstrap(
-                self.context(config_mode, "--bootstrap")?,
-            )));
         }
         Ok(None)
     }
@@ -391,14 +422,10 @@ impl ProductionTmux {
         std::env::current_exe().context("failed to determine current executable")
     }
 
-    fn bootstrap_spec(context: InvocationContext) -> Result<tmup::tmux::InitBootstrapSpec> {
+    fn bootstrap_spec(resume_path: &Path) -> Result<tmup::tmux::InitBootstrapSpec> {
         Ok(tmup::tmux::InitBootstrapSpec {
             exe: Self::executable()?,
-            config_path: context.config_path,
-            tpm_config_policy: context.tpm_identity.policy(),
-            data_root: context.data_root,
-            state_root: context.state_root,
-            config_mode: context.config_mode,
+            resume_path: resume_path.to_path_buf(),
         })
     }
 
@@ -436,11 +463,8 @@ impl TmuxAdapter for ProductionTmux {
         self.target.is_some()
     }
 
-    fn defer(&mut self, continuation: Continuation) -> Result<()> {
-        let Continuation::DeferredBootstrap(context) = continuation else {
-            anyhow::bail!("only deferred bootstrap continuations can be scheduled")
-        };
-        tmup::tmux::spawn_init_bootstrap(&Self::bootstrap_spec(context)?)
+    fn defer(&mut self, resume_path: &Path) -> Result<()> {
+        tmup::tmux::spawn_init_bootstrap(&Self::bootstrap_spec(resume_path)?)
     }
 
     fn host_child(&mut self, continuation: Continuation) -> Result<()> {
@@ -546,6 +570,8 @@ async fn execute_core(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
     use tempfile::tempdir;
@@ -557,7 +583,7 @@ mod tests {
         InspectUi,
         InspectCurrentHost,
         WaitForHost,
-        Defer(Continuation),
+        Defer(PathBuf),
         Host(Continuation),
         Fallback(String),
         Waiting,
@@ -574,6 +600,8 @@ mod tests {
         config_replacement_on_ui_inspection: Option<(PathBuf, String)>,
         config_replacement_on_defer: Option<(PathBuf, String)>,
         defer_fails: bool,
+        #[cfg(unix)]
+        block_record_cleanup_on_defer: bool,
     }
 
     impl MockTmux {
@@ -588,6 +616,8 @@ mod tests {
                 config_replacement_on_ui_inspection: None,
                 config_replacement_on_defer: None,
                 defer_fails: false,
+                #[cfg(unix)]
+                block_record_cleanup_on_defer: false,
             }
         }
     }
@@ -611,10 +641,16 @@ mod tests {
             self.waited_host_available
         }
 
-        fn defer(&mut self, continuation: Continuation) -> Result<()> {
-            self.requests.push(Request::Defer(continuation));
+        fn defer(&mut self, resume_path: &Path) -> Result<()> {
+            self.requests.push(Request::Defer(resume_path.to_path_buf()));
             if let Some((path, contents)) = self.config_replacement_on_defer.take() {
                 std::fs::write(path, contents).unwrap();
+            }
+            #[cfg(unix)]
+            if self.block_record_cleanup_on_defer {
+                let sessions_root = resume_path.parent().unwrap().parent().unwrap();
+                std::fs::set_permissions(sessions_root, std::fs::Permissions::from_mode(0o500))
+                    .unwrap();
             }
             if self.defer_fails {
                 anyhow::bail!("unable to schedule deferred bootstrap")
@@ -692,14 +728,10 @@ mod tests {
         let outcome = run_with_adapter(context.clone(), &mut tmux).await.unwrap();
 
         assert_eq!(outcome, Outcome::Deferred);
-        assert_eq!(
-            tmux.requests,
-            vec![
-                Request::InspectUi,
-                Request::InspectCurrentHost,
-                Request::Defer(Continuation::DeferredBootstrap(context)),
-            ]
-        );
+        assert!(matches!(
+            tmux.requests.as_slice(),
+            [Request::InspectUi, Request::InspectCurrentHost, Request::Defer(_)]
+        ));
     }
 
     #[tokio::test]
@@ -711,7 +743,7 @@ mod tests {
         let lock_path = context.state_root.join("operations.lock");
         tmux.expected_lock_path = Some(lock_path.clone());
 
-        let outcome = run_with_adapter(context, &mut tmux).await.unwrap();
+        let outcome = run_with_adapter(context.clone(), &mut tmux).await.unwrap();
 
         assert_eq!(outcome, Outcome::Completed);
         assert!(tmux.load_while_locked, "tmux loading must remain inside the operation lock");
@@ -719,6 +751,10 @@ mod tests {
         assert!(
             OperationLock::try_acquire(&lock_path).unwrap().is_some(),
             "the operation lock must be released after plugin loading"
+        );
+        assert!(
+            !context.state_root.join("init-sessions").exists(),
+            "the no-work fast path must not create continuation records"
         );
     }
 
@@ -735,7 +771,7 @@ mod tests {
         });
         let mut tmux = MockTmux::hosted();
 
-        let outcome = run_with_adapter(context, &mut tmux).await.unwrap();
+        let outcome = run_with_adapter(context.clone(), &mut tmux).await.unwrap();
         release_lock.join().unwrap();
 
         assert_eq!(outcome, Outcome::Completed);
@@ -820,11 +856,15 @@ mod tests {
         tmux.config_replacement_on_ui_inspection =
             Some((context.config_path.clone(), String::new()));
 
-        let outcome = run_with_adapter(context, &mut tmux).await.unwrap();
+        let outcome = run_with_adapter(context.clone(), &mut tmux).await.unwrap();
         release_lock.join().unwrap();
 
         assert_eq!(outcome, Outcome::Completed);
         assert!(matches!(tmux.requests.as_slice(), [Request::InspectUi, Request::Load(_)]));
+        assert!(
+            !context.state_root.join("init-sessions").exists(),
+            "the inline fast path must not create continuation records"
+        );
     }
 
     #[tokio::test]
@@ -885,6 +925,31 @@ mod tests {
             )),
         );
         assert!(matches!(tmux.requests.get(4), Some(Request::Load(_))));
+        let Request::Defer(record_path) = tmux.requests.get(2).unwrap() else { unreachable!() };
+        assert!(
+            !record_path.parent().unwrap().exists(),
+            "a failed deferred spawn must clean the session it created"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn record_cleanup_failure_does_not_cancel_inline_fallback() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        let sessions_root = context.state_root.join("init-sessions");
+        let mut tmux = MockTmux::hosted();
+        tmux.defer_fails = true;
+        tmux.block_record_cleanup_on_defer = true;
+        tmux.config_replacement_on_defer = Some((context.config_path.clone(), String::new()));
+
+        let result = run_with_adapter(context, &mut tmux).await;
+        std::fs::set_permissions(&sessions_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(result.unwrap(), Outcome::Completed);
+        assert!(tmux.requests.iter().any(|request| matches!(request, Request::Fallback(_))));
+        assert!(tmux.requests.iter().any(|request| matches!(request, Request::Load(_))));
     }
 
     #[tokio::test]
@@ -955,5 +1020,25 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!tmux.requests.iter().any(|request| matches!(request, Request::Load(_))));
+    }
+
+    #[tokio::test]
+    async fn resumed_session_cleans_its_directory_after_an_operation_error() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        write_config(&context, "");
+        std::fs::write(context.config_path.parent().unwrap().join("tmup.lock"), "not json")
+            .unwrap();
+        let published = record::publish_bootstrap(&context).unwrap();
+        let record_path = published.record_path().to_path_buf();
+        let session_dir = record_path.parent().unwrap().to_path_buf();
+
+        let result = resume_bootstrap_record(&record_path).await;
+
+        assert!(result.is_err());
+        assert!(
+            !session_dir.exists(),
+            "the resumed owner must clean its session after a handled error"
+        );
     }
 }

@@ -192,44 +192,19 @@ pub struct InitUiTarget {
 pub struct InitBootstrapSpec {
     /// Path to the tmup executable.
     pub exe: PathBuf,
-    /// Path to the tmup configuration file.
-    pub config_path: PathBuf,
-    /// Resolved TPM config loading policy for mixed-mode init.
-    pub tpm_config_policy: TpmConfigPolicy,
-    /// Root directory for persistent data.
-    pub data_root: PathBuf,
-    /// Root directory for runtime state.
-    pub state_root: PathBuf,
-    /// Configuration loading mode for the child process.
-    pub config_mode: ConfigMode,
+    /// Absolute path to the immutable bootstrap continuation record.
+    pub resume_path: PathBuf,
 }
 
 impl InitBootstrapSpec {
     fn build_shell_command(&self) -> String {
-        let config_mode = shell_env_assignment("TMUP_CONFIG_MODE", &self.config_mode.to_string());
-        let mut args = vec![
+        let args = vec![
             self.exe.to_string_lossy().into_owned(),
             "init".into(),
-            "--bootstrap".into(),
-            "--config-path".into(),
-            self.config_path.to_string_lossy().into_owned(),
+            "--resume".into(),
+            self.resume_path.to_string_lossy().into_owned(),
         ];
-        match &self.tpm_config_policy {
-            TpmConfigPolicy::Resolved(Some(tpm_config_path)) => {
-                args.push("--tpm-config-path".into());
-                args.push(tpm_config_path.to_string_lossy().into_owned());
-            }
-            TpmConfigPolicy::Resolved(None) => args.push("--no-tpm-config".into()),
-            // Parent init resolves discovery before constructing child specs.
-            TpmConfigPolicy::Disabled | TpmConfigPolicy::Discover => {}
-        }
-        args.extend([
-            "--data-root".into(),
-            self.data_root.to_string_lossy().into_owned(),
-            "--state-root".into(),
-            self.state_root.to_string_lossy().into_owned(),
-        ]);
-        format!("{config_mode} {}", shell_join(args))
+        shell_join(args)
     }
 }
 
