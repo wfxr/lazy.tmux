@@ -18,6 +18,16 @@ pub(crate) enum ResolvedTpmIdentity {
     Absent,
 }
 
+impl ResolvedTpmIdentity {
+    fn policy(&self) -> TpmConfigPolicy {
+        match self {
+            Self::Disabled => TpmConfigPolicy::Disabled,
+            Self::Path(path) => TpmConfigPolicy::Resolved(Some(path.clone())),
+            Self::Absent => TpmConfigPolicy::Resolved(None),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InvocationContext {
     config_mode: ConfigMode,
@@ -25,6 +35,18 @@ pub(crate) struct InvocationContext {
     tpm_identity: ResolvedTpmIdentity,
     data_root: PathBuf,
     state_root: PathBuf,
+}
+
+impl InvocationContext {
+    pub(crate) fn new(
+        config_mode: ConfigMode,
+        config_path: PathBuf,
+        tpm_identity: ResolvedTpmIdentity,
+        data_root: PathBuf,
+        state_root: PathBuf,
+    ) -> Self {
+        Self { config_mode, config_path, tpm_identity, data_root, state_root }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,7 +68,7 @@ pub(crate) struct PublicInvocation {
 }
 
 impl PublicInvocation {
-    fn new(config_mode: ConfigMode) -> Self {
+    pub(crate) fn new(config_mode: ConfigMode) -> Self {
         Self { config_mode }
     }
 }
@@ -56,7 +78,7 @@ trait TmuxAdapter {
     fn current_host_available(&mut self) -> bool;
     fn wait_for_host(&mut self) -> bool;
     fn defer(&mut self, continuation: Continuation) -> Result<()>;
-    fn host_child(&mut self, continuation: Continuation) -> Result<Outcome>;
+    fn host_child(&mut self, continuation: Continuation) -> Result<()>;
     fn display_fallback(&mut self, message: &str);
     fn display_waiting(&mut self);
     fn execute_load_plan(&mut self, plan: &[TmuxCommand]) -> Result<()>;
@@ -69,26 +91,21 @@ async fn resume_with_adapter(
     match continuation {
         Continuation::DeferredBootstrap(context) => {
             let loaded = load_context(&context)?;
-            let lock = load_lockfile(&loaded.paths)?;
-            let preview = sync::preview(
-                &loaded.config,
-                &lock,
-                None,
-                SyncPolicy::init(loaded.config.options.auto_install),
-                &loaded.paths,
-            );
-            if !preview.needs_work {
-                return execute_inline(&context, &loaded.warnings, tmux).await;
+            if !needs_sync_work(&loaded)? {
+                return execute_inline(&context, &loaded.warnings, LockWaitMessage::Announce, tmux)
+                    .await;
             }
             if !tmux.ui_available() {
-                tmux.display_fallback("tmup: unable to create progress UI, running inline");
-                return execute_inline(&context, &loaded.warnings, tmux).await;
+                return execute_inline(&context, &loaded.warnings, LockWaitMessage::Silent, tmux)
+                    .await;
             }
             if !tmux.wait_for_host() {
                 tmux.display_fallback("tmup: unable to create progress UI, running inline");
-                return execute_inline(&context, &loaded.warnings, tmux).await;
+                return execute_inline(&context, &loaded.warnings, LockWaitMessage::Silent, tmux)
+                    .await;
             }
-            tmux.host_child(Continuation::HostedChild(context))
+            tmux.host_child(Continuation::HostedChild(context))?;
+            Ok(Outcome::Completed)
         }
         Continuation::HostedChild(context) => execute_hosted(&context, tmux).await,
     }
@@ -133,13 +150,13 @@ fn resolve_normal_invocation(
     };
     let request = config_mode::LoadRequest::from_command(config_mode, false, tpm_policy);
     let loaded = config_mode::load_with_request(&paths, request)?;
-    let context = InvocationContext {
+    let context = InvocationContext::new(
         config_mode,
-        config_path: loaded.paths.config_path.clone(),
-        tpm_identity: resolved_tpm_identity(loaded.tpm_policy.clone())?,
-        data_root: loaded.paths.data_root().to_path_buf(),
-        state_root: loaded.paths.state_root().to_path_buf(),
-    };
+        loaded.paths.config_path.clone(),
+        resolved_tpm_identity(loaded.tpm_policy.clone())?,
+        loaded.paths.data_root().to_path_buf(),
+        loaded.paths.state_root().to_path_buf(),
+    );
     let loaded =
         LoadedContext { paths: loaded.paths, config: loaded.config, warnings: loaded.warnings };
     Ok((context, loaded))
@@ -170,28 +187,21 @@ async fn run_loaded_with_adapter(
     loaded: LoadedContext,
     tmux: &mut impl TmuxAdapter,
 ) -> Result<Outcome> {
-    let lock = load_lockfile(&loaded.paths)?;
-    let preview = sync::preview(
-        &loaded.config,
-        &lock,
-        None,
-        SyncPolicy::init(loaded.config.options.auto_install),
-        &loaded.paths,
-    );
-    if !preview.needs_work {
-        return execute_inline(&context, &loaded.warnings, tmux).await;
+    if !needs_sync_work(&loaded)? {
+        return execute_inline(&context, &loaded.warnings, LockWaitMessage::Announce, tmux).await;
     }
     if !tmux.ui_available() {
-        return execute_inline(&context, &loaded.warnings, tmux).await;
+        return execute_inline(&context, &loaded.warnings, LockWaitMessage::Silent, tmux).await;
     }
     if tmux.current_host_available() {
-        return tmux.host_child(Continuation::HostedChild(context));
+        tmux.host_child(Continuation::HostedChild(context))?;
+        return Ok(Outcome::Completed);
     }
     if tmux.defer(Continuation::DeferredBootstrap(context.clone())).is_ok() {
         return Ok(Outcome::Deferred);
     }
     tmux.display_fallback("tmup: unable to schedule background bootstrap, running inline");
-    execute_inline(&context, &loaded.warnings, tmux).await
+    execute_inline(&context, &loaded.warnings, LockWaitMessage::Silent, tmux).await
 }
 
 struct LoadedContext {
@@ -207,11 +217,7 @@ fn load_context(context: &InvocationContext) -> Result<LoadedContext> {
         context.config_path.clone(),
     )?;
     paths.ensure_dirs()?;
-    let tpm_policy = match &context.tpm_identity {
-        ResolvedTpmIdentity::Disabled => TpmConfigPolicy::Disabled,
-        ResolvedTpmIdentity::Path(path) => TpmConfigPolicy::Resolved(Some(path.clone())),
-        ResolvedTpmIdentity::Absent => TpmConfigPolicy::Resolved(None),
-    };
+    let tpm_policy = context.tpm_identity.policy();
     let request = config_mode::LoadRequest::from_command(context.config_mode, false, tpm_policy);
     let loaded = config_mode::load_with_request(&paths, request)?;
     Ok(LoadedContext { paths: loaded.paths, config: loaded.config, warnings: loaded.warnings })
@@ -225,9 +231,28 @@ fn load_lockfile(paths: &Paths) -> Result<LockFile> {
     }
 }
 
+fn needs_sync_work(loaded: &LoadedContext) -> Result<bool> {
+    let lock = load_lockfile(&loaded.paths)?;
+    Ok(sync::preview(
+        &loaded.config,
+        &lock,
+        None,
+        SyncPolicy::init(loaded.config.options.auto_install),
+        &loaded.paths,
+    )
+    .needs_work)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockWaitMessage {
+    Announce,
+    Silent,
+}
+
 async fn execute_inline(
     context: &InvocationContext,
     preview_warnings: &[String],
+    lock_wait_message: LockWaitMessage,
     tmux: &mut impl TmuxAdapter,
 ) -> Result<Outcome> {
     let loaded = load_context(context)?;
@@ -235,7 +260,9 @@ async fn execute_inline(
     let _guard = match OperationLock::try_acquire(&loaded.paths.lock_path)? {
         Some(guard) => guard,
         None => {
-            tmux.display_waiting();
+            if matches!(lock_wait_message, LockWaitMessage::Announce) {
+                tmux.display_waiting();
+            }
             OperationLock::acquire(&loaded.paths.lock_path)?
         }
     };
@@ -340,22 +367,13 @@ impl ProductionInitArgs {
                 .map(ResolvedTpmIdentity::Path)
                 .with_context(|| format!("{role} requires a resolved TPM config identity"))?,
         };
-        Ok(InvocationContext {
+        Ok(InvocationContext::new(
             config_mode,
-            config_path: self
-                .config_path
-                .clone()
-                .with_context(|| format!("{role} requires --config-path"))?,
+            self.config_path.clone().with_context(|| format!("{role} requires --config-path"))?,
             tpm_identity,
-            data_root: self
-                .data_root
-                .clone()
-                .with_context(|| format!("{role} requires --data-root"))?,
-            state_root: self
-                .state_root
-                .clone()
-                .with_context(|| format!("{role} requires --state-root"))?,
-        })
+            self.data_root.clone().with_context(|| format!("{role} requires --data-root"))?,
+            self.state_root.clone().with_context(|| format!("{role} requires --state-root"))?,
+        ))
     }
 }
 
@@ -377,7 +395,7 @@ impl ProductionTmux {
         Ok(tmup::tmux::InitBootstrapSpec {
             exe: Self::executable()?,
             config_path: context.config_path,
-            tpm_config_policy: tpm_policy(context.tpm_identity),
+            tpm_config_policy: context.tpm_identity.policy(),
             data_root: context.data_root,
             state_root: context.state_root,
             config_mode: context.config_mode,
@@ -391,7 +409,7 @@ impl ProductionTmux {
         Ok(tmup::tmux::InitUiChildSpec {
             exe: Self::executable()?,
             config_path: context.config_path,
-            tpm_config_policy: tpm_policy(context.tpm_identity),
+            tpm_config_policy: context.tpm_identity.policy(),
             data_root: context.data_root,
             state_root: context.state_root,
             wait_channel,
@@ -425,7 +443,7 @@ impl TmuxAdapter for ProductionTmux {
         tmup::tmux::spawn_init_bootstrap(&Self::bootstrap_spec(context)?)
     }
 
-    fn host_child(&mut self, continuation: Continuation) -> Result<Outcome> {
+    fn host_child(&mut self, continuation: Continuation) -> Result<()> {
         let Continuation::HostedChild(context) = continuation else {
             anyhow::bail!("only hosted-child continuations can be hosted")
         };
@@ -453,7 +471,10 @@ impl TmuxAdapter for ProductionTmux {
                 unreachable!("inline mode cannot host an Init Session child")
             }
         }?;
-        if result == 0 { Ok(Outcome::Completed) } else { Err(progress::reported_error()) }
+        // The legacy result record contains only an exit code, so it cannot safely
+        // distinguish plugin failures from operation failures. Preserve that transport
+        // until the continuation-record migration and surface either as a reported error.
+        if result == 0 { Ok(()) } else { Err(progress::reported_error()) }
     }
 
     fn display_fallback(&mut self, message: &str) {
@@ -466,14 +487,6 @@ impl TmuxAdapter for ProductionTmux {
 
     fn execute_load_plan(&mut self, plan: &[TmuxCommand]) -> Result<()> {
         tmup::tmux::execute_plan(plan)
-    }
-}
-
-fn tpm_policy(identity: ResolvedTpmIdentity) -> TpmConfigPolicy {
-    match identity {
-        ResolvedTpmIdentity::Disabled => TpmConfigPolicy::Disabled,
-        ResolvedTpmIdentity::Path(path) => TpmConfigPolicy::Resolved(Some(path)),
-        ResolvedTpmIdentity::Absent => TpmConfigPolicy::Resolved(None),
     }
 }
 
@@ -556,7 +569,6 @@ mod tests {
         ui_available: bool,
         current_host_available: bool,
         waited_host_available: bool,
-        hosted_outcome: Outcome,
         expected_lock_path: Option<PathBuf>,
         load_while_locked: bool,
         config_replacement_on_ui_inspection: Option<(PathBuf, String)>,
@@ -571,7 +583,6 @@ mod tests {
                 ui_available: true,
                 current_host_available: false,
                 waited_host_available: true,
-                hosted_outcome: Outcome::Completed,
                 expected_lock_path: None,
                 load_while_locked: false,
                 config_replacement_on_ui_inspection: None,
@@ -611,9 +622,9 @@ mod tests {
             Ok(())
         }
 
-        fn host_child(&mut self, continuation: Continuation) -> Result<Outcome> {
+        fn host_child(&mut self, continuation: Continuation) -> Result<()> {
             self.requests.push(Request::Host(continuation));
-            Ok(self.hosted_outcome.clone())
+            Ok(())
         }
 
         fn display_fallback(&mut self, message: &str) {
@@ -635,13 +646,13 @@ mod tests {
     }
 
     fn context(root: &Path) -> InvocationContext {
-        InvocationContext {
-            config_mode: ConfigMode::Pure,
-            config_path: root.join("config/tmux/tmup.kdl"),
-            tpm_identity: ResolvedTpmIdentity::Disabled,
-            data_root: root.join("data/tmup"),
-            state_root: root.join("state/tmup"),
-        }
+        InvocationContext::new(
+            ConfigMode::Pure,
+            root.join("config/tmux/tmup.kdl"),
+            ResolvedTpmIdentity::Disabled,
+            root.join("data/tmup"),
+            root.join("state/tmup"),
+        )
     }
 
     fn write_config(context: &InvocationContext, contents: &str) {
@@ -712,6 +723,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_work_fast_path_announces_lock_contention() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        write_config(&context, "");
+        let lock_path = context.state_root.join("operations.lock");
+        let held_lock = OperationLock::acquire(&lock_path).unwrap();
+        let release_lock = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(held_lock);
+        });
+        let mut tmux = MockTmux::hosted();
+
+        let outcome = run_with_adapter(context, &mut tmux).await.unwrap();
+        release_lock.join().unwrap();
+
+        assert_eq!(outcome, Outcome::Completed);
+        assert!(matches!(tmux.requests.as_slice(), [Request::Waiting, Request::Load(_)]));
+    }
+
+    #[tokio::test]
     async fn hosted_child_reloads_the_inherited_config_source() {
         let dir = tempdir().unwrap();
         let mut context = context(dir.path());
@@ -742,6 +773,26 @@ mod tests {
         let context = context(dir.path());
         write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
         let mut tmux = MockTmux::hosted();
+        tmux.waited_host_available = false;
+        tmux.config_replacement_on_ui_inspection =
+            Some((context.config_path.clone(), String::new()));
+
+        let outcome =
+            resume_with_adapter(Continuation::DeferredBootstrap(context), &mut tmux).await.unwrap();
+
+        assert_eq!(outcome, Outcome::Completed);
+        assert!(matches!(
+            tmux.requests.as_slice(),
+            [Request::InspectUi, Request::WaitForHost, Request::Fallback(_), Request::Load(_),]
+        ));
+    }
+
+    #[tokio::test]
+    async fn deferred_session_uses_inline_mode_without_a_fallback_message() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        let mut tmux = MockTmux::hosted();
         tmux.ui_available = false;
         tmux.config_replacement_on_ui_inspection =
             Some((context.config_path.clone(), String::new()));
@@ -750,12 +801,30 @@ mod tests {
             resume_with_adapter(Continuation::DeferredBootstrap(context), &mut tmux).await.unwrap();
 
         assert_eq!(outcome, Outcome::Completed);
-        assert_eq!(tmux.requests.first(), Some(&Request::InspectUi),);
-        assert_eq!(
-            tmux.requests.get(1),
-            Some(&Request::Fallback("tmup: unable to create progress UI, running inline".into(),)),
-        );
-        assert!(matches!(tmux.requests.get(2), Some(Request::Load(_))));
+        assert!(matches!(tmux.requests.as_slice(), [Request::InspectUi, Request::Load(_)]));
+    }
+
+    #[tokio::test]
+    async fn visible_work_inline_fallback_waits_for_the_lock_silently() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        let lock_path = context.state_root.join("operations.lock");
+        let held_lock = OperationLock::acquire(&lock_path).unwrap();
+        let release_lock = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(held_lock);
+        });
+        let mut tmux = MockTmux::hosted();
+        tmux.ui_available = false;
+        tmux.config_replacement_on_ui_inspection =
+            Some((context.config_path.clone(), String::new()));
+
+        let outcome = run_with_adapter(context, &mut tmux).await.unwrap();
+        release_lock.join().unwrap();
+
+        assert_eq!(outcome, Outcome::Completed);
+        assert!(matches!(tmux.requests.as_slice(), [Request::InspectUi, Request::Load(_)]));
     }
 
     #[tokio::test]
@@ -819,19 +888,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn normal_session_preserves_hosted_plugin_failure_classification() {
+    async fn normal_session_hosts_a_child_when_a_current_target_is_available() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
         write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
-        let failures = vec!["example.com/test/plugin: build failed".to_string()];
         let mut tmux = MockTmux::hosted();
         tmux.current_host_available = true;
-        tmux.hosted_outcome = Outcome::CompletedWithPluginFailures(failures.clone());
 
-        let outcome = run_with_adapter(context, &mut tmux).await.unwrap();
+        let outcome = run_with_adapter(context.clone(), &mut tmux).await.unwrap();
 
-        assert_eq!(outcome, Outcome::CompletedWithPluginFailures(failures));
-        assert!(matches!(tmux.requests.last(), Some(Request::Host(_))));
+        assert_eq!(outcome, Outcome::Completed);
+        assert_eq!(
+            tmux.requests,
+            vec![
+                Request::InspectUi,
+                Request::InspectCurrentHost,
+                Request::Host(Continuation::HostedChild(context)),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_sync_failure_loads_usable_plugins_and_returns_named_failures() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        let usable_plugin = dir.path().join("usable-plugin");
+        std::fs::create_dir_all(&usable_plugin).unwrap();
+        let usable_script = usable_plugin.join("usable.tmux");
+        std::fs::write(&usable_script, "#!/bin/sh\n").unwrap();
+        write_config(
+            &context,
+            &format!(
+                concat!(
+                    "plugin \"http://127.0.0.1:1/test/plugin.git\"\n",
+                    "plugin \"{}\" local=#true\n",
+                ),
+                usable_plugin.display(),
+            ),
+        );
+        let mut tmux = MockTmux::hosted();
+
+        let outcome =
+            resume_with_adapter(Continuation::HostedChild(context), &mut tmux).await.unwrap();
+
+        let Outcome::CompletedWithPluginFailures(failures) = outcome else {
+            panic!("plugin sync failure must produce a named failure outcome");
+        };
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("127.0.0.1:1/test/plugin"));
+        let Request::Load(plan) = tmux.requests.last().unwrap() else {
+            panic!("plugin-level failure must continue to tmux loading");
+        };
+        assert!(plan.contains(&TmuxCommand::RunShell { script: usable_script }));
     }
 
     #[tokio::test]
