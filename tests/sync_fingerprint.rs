@@ -87,6 +87,22 @@ fn enable_condition_expression_text_does_not_affect_fingerprints() {
 }
 
 #[test]
+fn false_enable_condition_changes_effective_spec_and_fingerprint_membership() {
+    let dir = tempdir().unwrap();
+    let enabled = dir.path().join("enabled/tmup.kdl");
+    let disabled = dir.path().join("disabled/tmup.kdl");
+    write_file(&enabled, r#"plugin "user/repo" enabled=#true"#);
+    write_file(&disabled, r#"plugin "user/repo" enabled=#false"#);
+
+    let enabled = load_from_sources(ConfigMode::Pure, Some(&enabled), None).unwrap();
+    let disabled = load_from_sources(ConfigMode::Pure, Some(&disabled), None).unwrap();
+
+    assert_eq!(enabled.config.plugins.len(), 1);
+    assert!(disabled.config.plugins.is_empty());
+    assert_ne!(config_fingerprint(&enabled.config), config_fingerprint(&disabled.config));
+}
+
+#[test]
 fn load_conditions_do_not_affect_plugin_or_config_fingerprints() {
     let dir = tempdir().unwrap();
     let first = dir.path().join("first/tmup.kdl");

@@ -82,18 +82,6 @@ impl<'snapshot> LoadEligibility<'snapshot> {
         self.plugins.iter().zip(self.values.iter().copied())
     }
 
-    /// Pair another plugin-ordered result set with this snapshot's eligibility.
-    pub fn align<T>(
-        self,
-        items: &'snapshot [T],
-    ) -> Result<impl Iterator<Item = (&'snapshot T, bool)>> {
-        anyhow::ensure!(
-            items.len() == self.values.len(),
-            "plugin-ordered results and Load Eligibility snapshot are inconsistent"
-        );
-        Ok(items.iter().zip(self.values.iter().copied()))
-    }
-
     /// Borrow the ordered eligibility values for diagnostics and assertions.
     pub fn values(self) -> &'snapshot [bool] {
         self.values
@@ -350,7 +338,7 @@ fn merge_configs(mut kdl: ParsedConfig, tpm: Config) -> ParsedConfig {
             merged.push(PluginDeclaration {
                 spec: plugin,
                 enabled: Condition::Bool(true),
-                cond: Condition::Bool(true),
+                load_condition: Condition::Bool(true),
             });
         }
     }

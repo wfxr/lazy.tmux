@@ -16,7 +16,7 @@ pub(crate) enum Condition {
 pub(crate) struct PluginDeclaration {
     pub(crate) spec: PluginSpec,
     pub(crate) enabled: Condition,
-    pub(crate) cond: Condition,
+    pub(crate) load_condition: Condition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +87,7 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
     validate_plugin_properties(node, &raw, warnings)?;
 
     let enabled = parse_condition(node, &raw, "enabled")?.unwrap_or(Condition::Bool(true));
-    let cond = parse_condition(node, &raw, "cond")?.unwrap_or(Condition::Bool(true));
+    let load_condition = parse_condition(node, &raw, "cond")?.unwrap_or(Condition::Bool(true));
 
     let is_local = get_bool(node, &raw, "local")?.unwrap_or(false);
 
@@ -201,7 +201,7 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
         PluginSpec::from_remote(raw, explicit_name, opt_prefix, tracking, build, opts)?
     };
 
-    Ok(PluginDeclaration { spec: source, enabled, cond })
+    Ok(PluginDeclaration { spec: source, enabled, load_condition })
 }
 
 pub(crate) fn validate_unique_ids<'a>(

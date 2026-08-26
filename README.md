@@ -315,8 +315,13 @@ plugin "company/desktop-tools" cond="test -z \"${SSH_CONNECTION:-}\""
 > Sync hashes the canonical remote identity, tracking selector, and `build`.
 > Equivalent remote spellings such as `.git` vs no `.git` do not trigger sync.
 > Comments, formatting, `name`, `opt`, `opt-prefix`, and local-plugin-only
-> changes do not trigger sync. Condition values, expression text, and Load
-> Eligibility also do not affect lock fingerprints.
+> changes do not trigger sync. The configuration fingerprint covers remote
+> plugins in the resulting Effective Plugin Specification. Changing an
+> `enabled` predicate while it continues to evaluate true does not affect the
+> fingerprint. If `enabled` becomes false for a remote plugin, that plugin
+> leaves the specification and lock snapshot, which changes the fingerprint.
+> `cond` values, predicate text, and Load Eligibility do not affect lock
+> fingerprints.
 
 ### Conditional plugins
 

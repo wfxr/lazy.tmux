@@ -9,6 +9,7 @@ use tabled::builder::Builder;
 use tabled::settings::object::Segment;
 use tabled::settings::{Alignment, Modify, Style};
 use tmup::config_mode::{self, ConfigMode, LoadEligibility, ResolutionIntent, TpmConfigPolicy};
+use tmup::model::PluginSource;
 use tmup::planner::{BuildStatus, PluginState, PluginStatus};
 use tmup::progress::{self, NullReporter, OperationStage, ProgressEvent, ProgressReporter};
 use tmup::state::{OperationLock, Paths};
@@ -373,16 +374,18 @@ fn print_default_statuses(
     statuses: &[PluginStatus],
     load_eligibility: LoadEligibility<'_>,
 ) -> Result<()> {
-    let rows = load_eligibility.align(statuses)?.map(|(s, load_eligible)| {
-        vec![
-            s.source.clone(),
-            s.kind.clone(),
-            style_state(s.state),
-            style_build_status(s.build_status),
-            style_load_eligibility(load_eligible),
-            style_lock_status(s.current_commit.as_deref(), s.lock_commit.as_deref()),
-        ]
-    });
+    let rows = associate_load_statuses(statuses, load_eligibility)?.into_iter().map(
+        |(s, load_eligible)| {
+            vec![
+                s.source.clone(),
+                s.kind.clone(),
+                style_state(s.state),
+                style_build_status(s.build_status),
+                style_load_eligibility(load_eligible),
+                style_lock_status(s.current_commit.as_deref(), s.lock_commit.as_deref()),
+            ]
+        },
+    );
     write_table(&render_table(["Plugin", "Kind", "State", "Build", "Load", "Lock"], rows))
 }
 
@@ -390,23 +393,49 @@ fn print_verbose_statuses(
     statuses: &[PluginStatus],
     load_eligibility: LoadEligibility<'_>,
 ) -> Result<()> {
-    let rows = load_eligibility.align(statuses)?.map(|(s, load_eligible)| {
-        vec![
-            s.id.clone(),
-            s.name.clone(),
-            s.kind.clone(),
-            style_state(s.state),
-            style_build_status(s.build_status),
-            style_load_eligibility(load_eligible),
-            style_commit(s.current_commit.as_deref()),
-            style_commit(s.lock_commit.as_deref()),
-            s.source.clone(),
-        ]
-    });
+    let rows = associate_load_statuses(statuses, load_eligibility)?.into_iter().map(
+        |(s, load_eligible)| {
+            vec![
+                s.id.clone(),
+                s.name.clone(),
+                s.kind.clone(),
+                style_state(s.state),
+                style_build_status(s.build_status),
+                style_load_eligibility(load_eligible),
+                style_commit(s.current_commit.as_deref()),
+                style_commit(s.lock_commit.as_deref()),
+                s.source.clone(),
+            ]
+        },
+    );
     write_table(&render_table(
         ["Id", "Name", "Kind", "State", "Build", "Load", "Current", "Expected", "Source"],
         rows,
     ))
+}
+
+fn associate_load_statuses<'status>(
+    statuses: &'status [PluginStatus],
+    load_eligibility: LoadEligibility<'_>,
+) -> Result<Vec<(&'status PluginStatus, bool)>> {
+    let mut associated = Vec::with_capacity(statuses.len());
+    let mut plugins = load_eligibility.plugins();
+    for status in statuses {
+        let (plugin, load_eligible) =
+            plugins.next().context("list produced more statuses than resolved plugins")?;
+        let expected_id = match &plugin.source {
+            PluginSource::Remote { id, .. } => id.as_str(),
+            PluginSource::Local { path } => path.as_str(),
+        };
+        anyhow::ensure!(
+            status.id == expected_id,
+            "list status identity mismatch: expected {expected_id:?}, got {:?}",
+            status.id
+        );
+        associated.push((status, load_eligible));
+    }
+    anyhow::ensure!(plugins.next().is_none(), "list produced fewer statuses than resolved plugins");
+    Ok(associated)
 }
 
 fn style_load_eligibility(load_eligible: bool) -> String {
@@ -513,9 +542,10 @@ mod tests {
 
     use anstream::{AutoStream, ColorChoice};
     use clap::Parser;
-    use tmup::config_mode::ConfigMode;
+    use tmup::config_mode::{ConfigMode, ResolutionIntent, load_from_sources_with_intent};
+    use tmup::planner::{BuildStatus, PluginState, PluginStatus};
 
-    use super::{Cli, Commands, parse_config_mode_env, render_table};
+    use super::{Cli, Commands, associate_load_statuses, parse_config_mode_env, render_table};
 
     fn adapt(text: &str, choice: ColorChoice) -> String {
         let mut stream = AutoStream::new(Vec::new(), choice);
@@ -545,6 +575,50 @@ mod tests {
         let table = render_table(["Plugin", "State"], [vec!["user/repo".into(), "missing".into()]]);
         let output = adapt(&table, ColorChoice::AlwaysAnsi);
         assert!(output.contains("\u{1b}[1mPlugin"));
+    }
+
+    #[test]
+    fn list_rejects_same_length_statuses_in_the_wrong_plugin_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("tmup.kdl");
+        std::fs::write(
+            &config_path,
+            r#"
+plugin "user/first" cond=#false
+plugin "user/second" cond=#true
+"#,
+        )
+        .unwrap();
+        let config = load_from_sources_with_intent(
+            ConfigMode::Pure,
+            Some(&config_path),
+            None,
+            ResolutionIntent::LoadEligibility,
+        )
+        .unwrap()
+        .config;
+        let statuses =
+            [plugin_status("github.com/user/second"), plugin_status("github.com/user/first")];
+
+        let error =
+            associate_load_statuses(&statuses, config.load_eligibility().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("identity mismatch"), "{error:#}");
+        assert!(error.to_string().contains("github.com/user/first"), "{error:#}");
+        assert!(error.to_string().contains("github.com/user/second"), "{error:#}");
+    }
+
+    fn plugin_status(id: &str) -> PluginStatus {
+        PluginStatus {
+            id: id.into(),
+            name: id.rsplit('/').next().unwrap().into(),
+            source: id.into(),
+            kind: "remote".into(),
+            state: PluginState::Missing,
+            build_status: BuildStatus::None,
+            current_commit: None,
+            lock_commit: None,
+        }
     }
 
     #[test]

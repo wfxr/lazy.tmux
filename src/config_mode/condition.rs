@@ -149,7 +149,7 @@ fn resolve_plugins_with_runner(
         let mut eligibility = Vec::with_capacity(enabled_declarations.len());
         for declaration in &enabled_declarations {
             eligibility.push(evaluate_condition(
-                &declaration.cond,
+                &declaration.load_condition,
                 declaration,
                 "cond",
                 working_dir,
