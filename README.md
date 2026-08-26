@@ -308,6 +308,65 @@ plugin "~/dev/my-tmux-plugin" local=#true name="my-plugin-dev"
 > Comments, formatting, `name`, `opt`, `opt-prefix`, and local-plugin-only
 > changes do not trigger sync.
 
+### Conditional plugins (unreleased)
+
+Conditional plugin declarations separate whether tmup manages a plugin from
+whether an Init Session loads it. This design applies to both remote and local
+plugins.
+
+<!-- prettier-ignore -->
+> [!NOTE]
+> Conditional plugin properties are accepted for a future release but are not
+> implemented in v0.1.0 or the current codebase.
+
+Both properties default to true and accept either a KDL bool or a non-empty
+shell predicate string:
+
+```kdl
+// Exclude this plugin from the effective spec on other hosts.
+plugin "company/workstation-tools" enabled="test \"$(hostname)\" = workstation"
+
+// Keep this plugin managed, but skip loading in an SSH environment.
+plugin "tmux-plugins/tmux-yank" cond="test -z \"${SSH_CONNECTION:-}\""
+```
+
+`enabled=#false` excludes the plugin from the effective plugin specification.
+The plugin does not participate in lifecycle commands, list output, targeted
+selectors, or the lock snapshot. If a previously enabled remote plugin becomes
+disabled, `sync` drops its lock entry and a later `clean` may remove its managed
+checkout.
+
+`cond=#false` keeps the plugin managed, installed, built, updated, and locked.
+During `init`, tmup skips both its options and its `*.tmux` scripts. Installation
+or build failures still make `init` return a non-zero status. Changing `cond`
+from true to false does not undo effects from an earlier load; restart the tmux
+server when you need to clear those effects.
+
+String predicates run with `/bin/sh`, inherit the tmup process environment, use
+the configuration directory as their working directory, and time out after
+five seconds. Exit status zero means true and every non-zero status means false.
+Predicates must be fast, side-effect-free, and independent of plugin state that
+the current command may change.
+
+Every command evaluates `enabled` from its own environment. Only `init` and
+`list` evaluate `cond`; `list` reports the current result as `LOAD=yes` or
+`LOAD=no`. This value describes whether a future Init Session would load the
+plugin, not whether a previous load still affects the tmux server.
+
+Use stable host properties for `enabled`. Environment values such as
+`SSH_CONNECTION` may differ between direct shell commands and commands launched
+by a long-lived tmux server. tmup does not infer which environment is correct.
+
+In mixed TPM mode, tmup merges declarations before evaluating conditions.
+TPM-only declarations are unconditional. A matching KDL declaration with
+`enabled=#false` suppresses the plugin instead of falling back to the TPM
+declaration.
+
+Unknown plugin parameters produce warnings and are otherwise ignored. Invalid
+values for `enabled` or `cond`, duplicate known scalar properties, and reserved
+condition child or type-annotation syntax are errors. Older tmup versions may
+ignore condition properties and load affected plugins unconditionally.
+
 ### Option mechanism
 
 Each `opt "key" "value"` child becomes:

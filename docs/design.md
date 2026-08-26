@@ -8,7 +8,8 @@ format fields, or UI/progress behavior), it does not belong here.
 ## Durable Goals
 
 - tmup is config-driven and automation-friendly.
-- The same config + lock snapshot yields reproducible remote plugin revisions.
+- The same Effective Plugin Specification and lock snapshot yield reproducible
+  remote plugin revisions.
 - Startup (`init`) is safe under concurrent execution.
 - Runtime behavior is explicit: partial per-plugin failures are surfaced as
   command failure via non-zero exit status.
@@ -18,10 +19,12 @@ format fields, or UI/progress behavior), it does not belong here.
 
 ### 1) Config-Driven Sync Before Mutation
 
-- `tmup.kdl` is the desired state for remote plugins.
+- Remote declarations whose Enable Conditions are true form the desired state
+  for an Execution Host.
 - `tmup.lock` is the resolved state used by mutating workflows.
-- Any mutating workflow that depends on remote state must reconcile config into
-  lock state before applying follow-up mutation.
+- Any mutating workflow that depends on remote state must reconcile the
+  Effective Plugin Specification into lock state before applying follow-up
+  mutation.
 - Reconciliation is by canonical remote plugin identity, not display metadata.
 
 ### 2) Lockfile-Backed Reproducibility
@@ -29,6 +32,7 @@ format fields, or UI/progress behavior), it does not belong here.
 - Lock entries are keyed by canonical remote plugin ID.
 - Restore-like behavior targets lock-recorded revisions.
 - Remote plugins participate in lock-backed lifecycle; local plugins do not.
+- Load Conditions do not change lock membership or lock fingerprints.
 - Lockfile corruption or parse failure is a hard error, not a silent reset.
 
 ### 3) Staged Publish and Rollback Safety
@@ -64,10 +68,25 @@ format fields, or UI/progress behavior), it does not belong here.
 - `clean` only handles undeclared managed remote repos; it is not a generic
   filesystem sanitizer.
 
+### 7) Conditional Inclusion and Loading
+
+Conditions separate host-specific managed state from tmux loading without
+weakening lock-backed lifecycle guarantees. See
+[ADR 0001](adr/0001-separate-plugin-inclusion-from-loading.md) for the trade-offs
+behind this boundary.
+
+- Enable Conditions project declarations into one Effective Plugin
+  Specification per Execution Host.
+- Load Conditions only control whether an Init Session sets a plugin's options
+  and runs its scripts; they do not change managed state.
+- Conditional loading is scoped to the tmux server's Execution Host, not to
+  individual clients.
+- A false Load Condition does not undo effects from an earlier load.
+
 ## TPM Compatibility Contract (Stable Surface)
 
-- Compatibility is defined as: set tmux options and load plugin `*.tmux`
-  scripts in declared order.
+- Compatibility is defined as: for plugins with Load Eligibility, set tmux
+  options and load plugin `*.tmux` scripts in effective declaration order.
 - tmup does not promise TPM's internal repository layout or helper-script
   behavior.
 - Plugins that depend on TPM internals are outside tmup's compatibility target.
@@ -79,6 +98,8 @@ format fields, or UI/progress behavior), it does not belong here.
 - Implicitly updating existing plugin revisions during `init`.
 - Treating local plugin paths as lock-managed remote plugins.
 - Guaranteeing behavior for manual, in-place mutation of tmup-managed repos.
+- Providing client-specific plugin loading within one tmux server.
+- Unloading or reversing arbitrary plugin effects when a Load Condition changes.
 
 ## Change Discipline
 
