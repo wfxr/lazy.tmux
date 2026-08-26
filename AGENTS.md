@@ -1,69 +1,27 @@
 # Repository Guidelines
 
-## Project Overview
+`tmup` is a config-driven Rust CLI for managing tmux plugins. Favor reproducible, rollback-safe, and script-friendly behavior over implementation simplicity.
 
-`tmup` is a Rust CLI tmux plugin manager inspired by `lazy.nvim`.
-It is built around config-driven sync from `tmup.kdl`, lockfile-backed reproducibility with `tmup.lock`, safe publish and rollback semantics, and a persistent bare repo cache for remote plugins.
+## Behavioral Invariants
 
-Keep these behavioral invariants intact when making changes:
+- Reconcile `tmup.kdl` into `tmup.lock` before follow-up mutations that depend on remote state, so desired and resolved state remain aligned.
+- Keep `init` safe under concurrent execution. It may install or repair configured state, but it must not advance revisions beyond the declared config because startup must remain deterministic.
+- Publish revision changes through staging. If preparation or a build fails, preserve the previously installed and locked revision so an unsuccessful update cannot break a working setup.
+- Use the canonical remote plugin ID consistently for repository-cache paths, lock keys, install paths, and targeted CLI selectors. Treat display names as presentation only.
+- Keep config, lockfile, and managed on-disk state consistent. Treat lockfile corruption or parse failure as a hard error rather than silently resetting state.
+- Preserve script-friendly CLI semantics and exit codes. Partial per-plugin failures must produce a non-zero exit status.
+- For changes to sync, init, lockfile behavior, remote identity, publish or rollback, or managed-state boundaries, read `docs/design.md`; it is the source of truth for the complete contract and intentional non-goals.
 
-- `sync` reconciles config into the lock snapshot before follow-up mutation.
-- `init` must remain safe under concurrent execution and must not perform implicit updates beyond declared config.
-- Revision changes publish through staging with rollback on build failure.
-- Remote plugin IDs, lock keys, install paths, and targeted CLI selectors stay aligned.
+## Verification
 
-## Repository Structure
+A behavior change is incomplete until its tests and validation cover the affected contract.
 
-- `src/main.rs`: CLI entrypoint and command dispatch.
-- `src/sync.rs`: reconciliation logic and sync policy handling.
-- `src/plugin.rs`: install, update, restore, clean, and list behavior.
-- `src/git.rs` and `src/repo.rs`: git operations, repo preparation, and bare cache handling.
-- `src/state.rs`: runtime paths, lock coordination, and failure marker state.
-- `src/loader.rs` and `src/tmux.rs`: tmux-facing init and loading behavior.
-- Other modules in `src/` cover config parsing, lockfile handling, data models, sync planning, terminal UI, and progress display.
-- `tests/`: integration-heavy coverage grouped by behavior, including CLI commands, sync semantics, repo cache behavior, restore/publish flows, and tmux/init regressions.
-- `docs/design.md`: source of truth for architecture, invariants, and intentional non-goals.
+- Add or update tests for every behavior change. Prefer integration tests for CLI behavior, sync semantics, repository-cache behavior, publish or rollback, and lockfile interactions because these contracts span module boundaries.
+- Preserve regression coverage for partial-failure reporting, failure markers, and targeted operations.
+- Run `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` before finishing work.
+- Manually verify affected tmux flows when changing `init`, popup or split behavior, loader ordering, or other tmux-facing runtime behavior.
 
-## Development Commands
-
-Run these checks before finishing work:
-
-- `cargo fmt --check`
-- `cargo clippy -- -D warnings`
-- `cargo test`
-
-## Testing Expectations
-
-- Add or update tests for every behavior change.
-- Prefer integration tests in `tests/` when changing CLI behavior, sync semantics, repo-cache behavior, publish/rollback, or lockfile interactions.
-- Keep existing regression coverage intact for partial-failure reporting, failure markers, and targeted operations.
-- Do manual tmux verification when changes affect `init`, popup/split flow, loader ordering, or other tmux-facing runtime behavior.
-
-## Coding Guidance
-
-- Follow the existing Rust style and keep modules focused on their current responsibilities.
-- Preserve CLI semantics and exit-code behavior; this project is intended to be script-friendly.
-- Do not weaken lockfile, repo-cache, rollback, or concurrency guarantees just to simplify an implementation.
-- Keep config, lockfile, and on-disk managed state consistent with the design documented in `docs/design.md`.
-- When changing remote plugin handling, verify that canonical IDs, cache paths, lock entries, and install directories still move together.
-
-## Commit And PR Guidance
-
-Commit messages must follow the Conventional Commits specification:
-
-- Use the imperative mood in the subject line.
-- Do not end the subject line with a period.
-- Limit the subject line to 72 characters.
-- Wrap the body at 72 characters.
-- Use the body to explain what and why rather than how.
-
-PRs should:
-
-- Include a short summary of the behavioral change.
-- Report the verification you ran.
-- Call out manual tmux testing when the change affects tmux-facing behavior.
-
-## Agent skills
+## Agent Skills
 
 ### Disabled plugins
 

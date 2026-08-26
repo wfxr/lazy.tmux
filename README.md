@@ -210,8 +210,8 @@ tmux source-file ~/.tmux.conf
 ```
 
 tmup will auto-install missing plugins on the first `init` and generate
-`tmup.lock`. Commit the lock snapshot to version control for reproducible
-setups across machines.
+`tmup.lock`. The lock snapshot records the resolved plugin revisions so an
+existing environment can be reproduced when needed.
 
 ## Configuration
 
