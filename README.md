@@ -275,10 +275,10 @@ plugin "https://gitlab.com/user/my-plugin.git"
 plugin "~/dev/my-tmux-plugin" local=#true name="my-plugin-dev"
 
 // Manage this plugin only on one stable execution host
-plugin "company/workstation-tools" enabled="test \"$(hostname)\" = workstation"
+plugin "company/workstation-tools" enabled=#"test "$(hostname)" = workstation"#
 
-// Keep this plugin managed, but skip its options and scripts in SSH environments
-plugin "company/desktop-tools" cond="test -z \"${SSH_CONNECTION:-}\""
+// Keep this plugin managed, but load it only in SSH environments
+plugin "company/remote-tools" cond=#"[ -n "$SSH_CLIENT" ]"#
 
 // Disable with KDL slashdash
 /-plugin "tmux-plugins/tmux-continuum"
@@ -334,10 +334,10 @@ shell predicate string:
 
 ```kdl
 // Exclude this plugin from the effective spec on other hosts.
-plugin "company/workstation-tools" enabled="test \"$(hostname)\" = workstation"
+plugin "company/workstation-tools" enabled=#"test "$(hostname)" = workstation"#
 
-// Keep this plugin managed, but skip loading in an SSH environment.
-plugin "tmux-plugins/tmux-yank" cond="test -z \"${SSH_CONNECTION:-}\""
+// Keep this plugin managed, but load only in an SSH environment.
+plugin "company/remote-tools" cond=#"[ -n "$SSH_CLIENT" ]"#
 ```
 
 `enabled=#false` excludes the plugin from the Effective Plugin Specification.
@@ -373,7 +373,7 @@ advisory preview, but its final execution rereads the inherited config and
 resolves one authoritative snapshot before managed-state mutation.
 
 Use stable host properties for `enabled`. Environment values such as
-`SSH_CONNECTION` may differ between direct shell commands and commands launched
+`SSH_CLIENT` may differ between direct shell commands and commands launched
 by a long-lived tmux server. tmup does not infer which environment is correct.
 
 In mixed TPM mode, tmup merges declarations before evaluating conditions.
