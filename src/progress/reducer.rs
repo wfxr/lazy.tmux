@@ -217,10 +217,10 @@ pub(crate) fn apply_event(snapshot: &mut ProgressSnapshot, event: &SnapshotUpdat
                 .get(id.as_str())
                 .and_then(|idx| snapshot.plugins.get_mut(*idx))
             {
-                if matches!(
-                    plugin.state,
-                    PluginDisplayState::Finished(_) | PluginDisplayState::Failed { .. }
-                ) {
+                if matches!(plugin.state, PluginDisplayState::Failed { .. })
+                    || matches!(plugin.state, PluginDisplayState::Finished(_))
+                        && !matches!(stage, Some(PluginStage::Loading))
+                {
                     return;
                 }
                 plugin.state =
@@ -460,6 +460,36 @@ mod tests {
         assert!(matches!(
             snapshot.plugins[0].state,
             super::PluginDisplayState::Failed { stage: Some(PluginStage::Fetching), .. }
+        ));
+    }
+
+    #[test]
+    fn reducer_replaces_sync_success_with_later_runtime_failure() {
+        let mut snapshot = ProgressSnapshot::new_for_tests([("github.com/acme/a", "plugin-a")]);
+
+        apply_event(
+            &mut snapshot,
+            &SnapshotUpdate::PluginFinished {
+                id: "github.com/acme/a".to_string(),
+                outcome: PluginOutcome::Synced { commit: "abc1234".to_string() },
+            },
+        );
+        apply_event(
+            &mut snapshot,
+            &SnapshotUpdate::PluginFailed {
+                id: "github.com/acme/a".to_string(),
+                stage: Some(PluginStage::Loading),
+                summary: "tmux run-shell failed".to_string(),
+            },
+        );
+
+        assert!(matches!(
+            snapshot.plugins[0].state,
+            super::PluginDisplayState::Failed {
+                stage: Some(PluginStage::Loading),
+                ref summary,
+            }
+                if summary == "tmux run-shell failed"
         ));
     }
 

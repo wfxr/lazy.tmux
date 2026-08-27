@@ -142,6 +142,7 @@ fn plugin_stage_label(stage: PluginStage) -> &'static str {
         PluginStage::Resolving => "resolving",
         PluginStage::CheckingOut => "checking out",
         PluginStage::Applying => "building",
+        PluginStage::Loading => "loading",
     }
 }
 

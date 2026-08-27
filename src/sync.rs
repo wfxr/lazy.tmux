@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -32,12 +32,28 @@ pub enum SyncMode {
 pub struct SyncOutcome {
     /// Human-readable failure messages, each formatted as `"<id>: <error>"`.
     pub plugin_failures: Vec<String>,
+    /// Canonical remote plugin IDs that must not load after this sync pass.
+    load_excluded_plugin_ids: HashSet<String>,
 }
 
 impl SyncOutcome {
     /// Returns `true` when no plugin failures were recorded.
     pub fn is_clean(&self) -> bool {
         self.plugin_failures.is_empty()
+    }
+
+    /// Return canonical IDs for plugins that must not load after this sync pass.
+    pub fn load_excluded_plugin_ids(&self) -> &HashSet<String> {
+        &self.load_excluded_plugin_ids
+    }
+
+    fn record_plugin_failure(&mut self, id: &str, failure: String) {
+        self.load_excluded_plugin_ids.insert(id.to_string());
+        self.plugin_failures.push(failure);
+    }
+
+    fn exclude_plugin_from_load(&mut self, id: &str) {
+        self.load_excluded_plugin_ids.insert(id.to_string());
     }
 }
 
@@ -172,33 +188,39 @@ pub async fn run(
         match result {
             Ok(resolved) => {
                 let resolved_commit = resolved.entry.commit.clone();
-                if let Err(err) =
-                    reconcile_plugin(spec, lock, paths, mode, resolved, reporter).await
-                {
-                    outcome.plugin_failures.push(plugin::report_plugin_failure(
-                        reporter,
-                        id,
-                        name,
-                        PluginStage::Applying,
-                        &err,
-                        vec![
-                            ("clone_url", clone_url.clone()),
-                            ("tracking", tracking.clone()),
-                            ("resolved_commit", resolved_commit),
-                            ("target_dir", paths.plugin_dir(id).display().to_string()),
-                        ],
-                    ));
+                match reconcile_plugin(spec, lock, paths, mode, resolved, reporter).await {
+                    Ok(ReconcileDisposition::ReadyToLoad) => {}
+                    Ok(ReconcileDisposition::KnownFailure) => {
+                        outcome.exclude_plugin_from_load(id);
+                    }
+                    Err(err) => {
+                        let failure = plugin::report_plugin_failure(
+                            reporter,
+                            id,
+                            name,
+                            PluginStage::Applying,
+                            &err,
+                            vec![
+                                ("clone_url", clone_url.clone()),
+                                ("tracking", tracking.clone()),
+                                ("resolved_commit", resolved_commit),
+                                ("target_dir", paths.plugin_dir(id).display().to_string()),
+                            ],
+                        );
+                        outcome.record_plugin_failure(id, failure);
+                    }
                 }
             }
             Err(err) => {
-                outcome.plugin_failures.push(plugin::report_plugin_failure(
+                let failure = plugin::report_plugin_failure(
                     reporter,
                     id,
                     name,
                     err.stage,
                     &err.err,
                     vec![("clone_url", clone_url.clone()), ("tracking", tracking.clone())],
-                ));
+                );
+                outcome.record_plugin_failure(id, failure);
             }
         }
     }
@@ -309,6 +331,11 @@ struct ResolvedPlugin {
     entry: LockEntry,
 }
 
+enum ReconcileDisposition {
+    ReadyToLoad,
+    KnownFailure,
+}
+
 async fn resolve_desired_plugin(
     spec: &PluginSpec,
     current_entry: Option<&LockEntry>,
@@ -414,7 +441,7 @@ async fn reconcile_plugin(
     mode: SyncMode,
     resolved: ResolvedPlugin,
     reporter: &dyn ProgressReporter,
-) -> Result<()> {
+) -> Result<ReconcileDisposition> {
     let ResolvedPlugin { id, staging_dir, entry } = resolved;
 
     let name = spec.name.as_str();
@@ -448,7 +475,7 @@ async fn reconcile_plugin(
             name,
             outcome: PluginOutcome::Reconciled,
         });
-        return Ok(());
+        return Ok(ReconcileDisposition::ReadyToLoad);
     }
 
     if should_skip_known_failure(mode, paths, &id, &entry.commit, spec.build.as_deref())? {
@@ -460,7 +487,7 @@ async fn reconcile_plugin(
             },
         });
         let _ = std::fs::remove_dir_all(&staging_dir);
-        return Ok(());
+        return Ok(ReconcileDisposition::KnownFailure);
     }
 
     reporter.report(ProgressEvent::PluginStage {
@@ -487,7 +514,7 @@ async fn reconcile_plugin(
                 name,
                 outcome: PluginOutcome::Synced { commit: synced_commit },
             });
-            Ok(())
+            Ok(ReconcileDisposition::ReadyToLoad)
         }
         Err(err) => {
             let _ = std::fs::remove_dir_all(&staging_dir);

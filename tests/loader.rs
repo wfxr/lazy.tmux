@@ -2,7 +2,7 @@ use tempfile::tempdir;
 use tmup::config_mode::{
     ConfigMode, ResolutionIntent, ResolvedConfig, load_from_sources_with_intent,
 };
-use tmup::loader::build_load_plan;
+use tmup::loader::{PluginLoadCommand, build_load_plan};
 use tmup::tmux::TmuxCommand;
 
 fn resolve_config(root: &std::path::Path, input: &str) -> ResolvedConfig {
@@ -39,30 +39,34 @@ plugin "user/plugin-a" opt-prefix="pa_" {
     );
 
     let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
+    let commands: Vec<_> = plan.iter().collect();
 
     // 1. First command should be SetEnvironment
     assert!(
-        matches!(&plan[0], TmuxCommand::SetEnvironment { key, .. } if key == "TMUX_PLUGIN_MANAGER_PATH")
+        matches!(commands[0], TmuxCommand::SetEnvironment { key, .. } if key == "TMUX_PLUGIN_MANAGER_PATH")
     );
 
     // 2. Second should be the opt
-    assert_eq!(plan[1], TmuxCommand::SetOption { key: "pa_theme".into(), value: "dark".into() });
+    assert_eq!(
+        commands[1],
+        &TmuxCommand::SetOption { key: "pa_theme".into(), value: "dark".into() }
+    );
 
     // 3. *.tmux files in sorted order
-    match &plan[2] {
+    match commands[2] {
         TmuxCommand::RunShell { script } => {
             assert!(script.file_name().unwrap().to_str().unwrap().starts_with("00-"));
         }
         other => panic!("expected RunShell, got {other:?}"),
     }
-    match &plan[3] {
+    match commands[3] {
         TmuxCommand::RunShell { script } => {
             assert!(script.file_name().unwrap().to_str().unwrap().starts_with("10-"));
         }
         other => panic!("expected RunShell, got {other:?}"),
     }
 
-    assert_eq!(plan.len(), 4);
+    assert_eq!(commands.len(), 4);
 }
 
 #[test]
@@ -103,6 +107,49 @@ plugin "user/plugin-b"
 }
 
 #[test]
+fn loader_attributes_each_plugin_command_to_its_plugin() {
+    let dir = tempdir().unwrap();
+    let plugin_root = dir.path().join("plugins");
+    for name in ["plugin-a", "plugin-b"] {
+        let plugin_dir = plugin_root.join(format!("github.com/user/{name}"));
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join(format!("{name}.tmux")), "#!/bin/sh").unwrap();
+    }
+    let config = resolve_config(
+        dir.path(),
+        r#"
+plugin "user/plugin-a" { env "PLUGIN_A" "yes" }
+plugin "user/plugin-b" { env "PLUGIN_B" "yes" }
+"#,
+    );
+
+    let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
+
+    assert!(matches!(
+        plan.plugin_commands.first(),
+        Some(PluginLoadCommand {
+            plugin_id,
+            plugin_name,
+            command: TmuxCommand::SetEnvironment { key, .. },
+        }) if plugin_id == "github.com/user/plugin-a"
+            && plugin_name == "plugin-a"
+            && key == "PLUGIN_A"
+    ));
+    assert!(
+        plan.plugin_commands
+            .iter()
+            .filter(|entry| entry.plugin_id == "github.com/user/plugin-a")
+            .all(|entry| entry.plugin_name == "plugin-a")
+    );
+    assert!(
+        plan.plugin_commands
+            .iter()
+            .filter(|entry| entry.plugin_id == "github.com/user/plugin-b")
+            .all(|entry| entry.plugin_name == "plugin-b")
+    );
+}
+
+#[test]
 fn loader_applies_plugin_setup_before_loading_any_scripts() {
     let dir = tempdir().unwrap();
     let plugin_root = dir.path().join("plugins");
@@ -137,9 +184,10 @@ plugin "user/plugin-b" opt-prefix="b_" {
     );
 
     let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
+    let commands: Vec<_> = plan.iter().cloned().collect();
 
     assert_eq!(
-        plan,
+        commands,
         vec![
             TmuxCommand::SetEnvironment {
                 key: "TMUX_PLUGIN_MANAGER_PATH".into(),
@@ -190,8 +238,8 @@ fn loader_handles_missing_plugin_dir() {
     let config = resolve_config(dir.path(), r#"plugin "user/missing""#);
     let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
 
-    // Should have env setup but no RunShell (plugin dir doesn't exist)
-    assert_eq!(plan.len(), 1); // just SetEnvironment
+    assert!(plan.plugin_commands.is_empty());
+    assert!(matches!(plan.global_setup, TmuxCommand::SetEnvironment { .. }));
 }
 
 #[test]
@@ -257,7 +305,7 @@ plugin "user/load-last" opt-prefix="last_" { opt "mode" "yes" }
 
     let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
 
-    assert!(matches!(plan.first(), Some(TmuxCommand::SetEnvironment { .. })));
+    assert!(matches!(plan.global_setup, TmuxCommand::SetEnvironment { .. }));
     assert!(!plan.iter().any(|command| match command {
         TmuxCommand::SetOption { key, .. } => key.starts_with("skip_"),
         TmuxCommand::RunShell { script } => script.ends_with("skip.tmux"),

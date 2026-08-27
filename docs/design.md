@@ -88,9 +88,20 @@ behind this boundary.
 
 - Compatibility is defined as: initialize the plugin manager path, then apply
   each plugin's ordered tmux environment operations and options for all plugins
-  with Load Eligibility before loading their `*.tmux` scripts in effective
-  declaration order, then register all explicit bindings in plugin and node
-  declaration order.
+  with Load Eligibility that were not excluded by a reconciliation failure,
+  then load their `*.tmux` scripts in effective declaration order and register
+  all explicit bindings in plugin and node declaration order.
+- A plugin reconciliation failure omits every runtime command for that plugin
+  from the current Init Session, even when staged-publish rollback preserves an
+  older installed revision and lock entry.
+- The first plugin-attributable tmux command failure skips that plugin's
+  remaining commands in the current and later phases. Independent plugins
+  continue, and all plugin failures produce a non-zero final outcome.
+- Failure of the initial tmup-owned plugin-manager-path command is an
+  operation-level error and aborts loading because it is not attributable to a
+  plugin.
+- Runtime loading is not transactional. Environment values, options, script
+  effects, and bindings that completed before a later failure remain applied.
 - Runtime environment and binding declarations are replayed only by `init`.
   They do not affect lock fingerprints, and removing a declaration does not
   clean up an effect from an earlier Init Session.

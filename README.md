@@ -43,12 +43,12 @@ lazy.nvim's design philosophy to tmux:
   `build` only syncs that plugin.
 - **Build failure memory** — failed builds are recorded as
   `(plugin, commit, build-command-hash)` tuples. Those markers are surfaced in
-  `list`, and exact-tuple suppression currently applies in the install path
-  after commit resolution; because `init` starts with implicit `sync`, startup
-  may still re-surface the same failure.
-- **Partial failure reporting** — commands like `install` and `update` publish
-  successful plugins and write the lock, but return a non-zero exit code if
-  any plugin fails.
+  `list`. During `init`, an exact match suppresses the repeated build and keeps
+  that plugin out of runtime loading; a changed tuple remains eligible for a
+  retry.
+- **Partial failure reporting** — lifecycle commands publish successful
+  plugins and write the lock, while `init` continues loading independent
+  plugins. Every command returns a non-zero exit code if any plugin fails.
 - **TPM-compatible** — plugins that use `@option` + `*.tmux` entry scripts work
   out of the box.
 - **Conditional inclusion and loading** — reuse one config across hosts while
@@ -357,8 +357,7 @@ plugin scripts.
 
 Environment operations are replayed only by `tmup init`. Removing an `env`
 declaration doesn't remove a value that an earlier Init Session set. Add an
-explicit `unset-env` or restart the tmux server when you need to clear it. tmup
-doesn't roll back environment changes if a later load command fails.
+explicit `unset-env` or restart the tmux server when you need to clear it.
 
 Each `bind` block requires exactly one `shell` child and accepts at most one
 `options` child:
@@ -504,12 +503,29 @@ Designed for `run-shell "tmup init"` in `.tmux.conf`.
 5. **Load tmux state** — initialize `TMUX_PLUGIN_MANAGER_PATH`, apply every
    eligible plugin's ordered environment operations and options in declaration
    order, source all eligible plugins' sorted `*.tmux` files, then register all
-   explicit bindings in plugin and node declaration order.
+   explicit bindings in plugin and node declaration order. Each phase omits
+   plugins excluded by a reconciliation failure.
+
+If a remote plugin fails synchronization, preparation, or its staged build,
+that plugin contributes no runtime configuration during the Init Session. This
+remains true when rollback preserves an older working checkout and lock entry.
+A matching known-failure marker suppresses the repeated build attempt and keeps
+the plugin omitted from loading. Independent plugins continue loading.
+
+If tmux rejects a plugin's environment operation, option, script, or binding,
+tmup skips that plugin's remaining commands in the current and later phases.
+Other plugins continue, and all plugin failures contribute to the final
+non-zero exit status. Commands that completed before a later failure remain
+applied: tmup doesn't snapshot, compensate, or roll back tmux environment
+values, options, script effects, or bindings.
+
+Failure of the initial tmup-owned `TMUX_PLUGIN_MANAGER_PATH` command aborts
+loading as an operation-level error because it doesn't belong to one plugin.
 
 `init` never advances floating selectors beyond what config declares. Known
-build failures are still recorded and surfaced, but because startup begins with
-implicit `sync`, `init` may re-surface the same failure before the later
-install-path suppression check runs.
+build failures remain recorded. When the same plugin, commit, and build command
+tuple recurs, `init` suppresses the repeated build and omits that plugin from
+runtime loading. A changed desired tuple remains eligible for reconciliation.
 
 ### `sync` — reconcile config into the lock snapshot
 

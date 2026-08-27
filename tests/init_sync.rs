@@ -69,6 +69,43 @@ exit 0
 }
 
 #[cfg(unix)]
+fn write_selectively_failing_tmux(root: &Path, log: &Path) -> PathBuf {
+    let bin_dir = root.join("bin-selectively-failing-tmux");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let script = bin_dir.join("tmux");
+    std::fs::write(
+        &script,
+        format!(
+            r#"#!/bin/sh
+case "$1" in
+  -V) printf 'tmux 1.9\n'; exit 0 ;;
+esac
+printf 'command' >> '{log}'
+for arg do
+  printf '|%s' "$arg" >> '{log}'
+done
+printf '\n' >> '{log}'
+for arg do
+  case "$arg" in
+    *"$TMUX_FAIL_ARG"*)
+      printf 'selected tmux failure: %s\n' "$TMUX_FAIL_ARG" >&2
+      exit 73
+      ;;
+  esac
+done
+printf 'applied\n' >> '{log}'
+"#,
+            log = log.display(),
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).unwrap();
+    bin_dir
+}
+
+#[cfg(unix)]
 fn write_lock_probe_tmux(root: &Path) -> (PathBuf, PathBuf) {
     let bin_dir = root.join("bin-lock-probe-tmux");
     let handshake = root.join("init-lock-handshake");
@@ -207,6 +244,10 @@ async fn init_does_not_retry_same_failed_build_tuple() {
         "init-mode sync should suppress known failed (id, commit, build) tuples"
     );
     assert!(
+        outcome.load_excluded_plugin_ids().contains("example.com/test/plugin"),
+        "known failed desired state must not load against the preserved checkout"
+    );
+    assert!(
         !marker_path.exists(),
         "init-mode sync should skip publish/build when tuple is already known-failed"
     );
@@ -300,6 +341,8 @@ async fn init_preflight_sync_failure_preserves_previous_lock_snapshot() {
         outcome.plugin_failures[0].contains("example.com/test/plugin"),
         "plugin failure should include plugin id"
     );
+    assert_eq!(outcome.load_excluded_plugin_ids().len(), 1);
+    assert!(outcome.load_excluded_plugin_ids().contains("example.com/test/plugin"));
 
     let persisted = read_lockfile(&paths.lockfile_path).unwrap();
     let entry = persisted.plugins.get("example.com/test/plugin").unwrap();
@@ -524,6 +567,270 @@ end\n",
             local_plugin_shell = local_plugin_shell,
         )
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn public_init_isolates_each_plugin_attributable_tmux_failure() {
+    let cases = [
+        ("A_FAIL_ENV", "A_BEFORE", &["A_AFTER_ENV", "@a_fail", "a-00-before.tmux", "A-before"][..]),
+        ("@a_fail", "A_FAIL_ENV", &["@a_after", "a-00-before.tmux", "A-before"]),
+        ("a-10-fail.tmux", "a-00-before.tmux", &["a-20-after.tmux", "A-before"]),
+        ("A-fail", "A-before", &["A-after"]),
+    ];
+
+    for (fail_arg, earlier_success, skipped_after_failure) in cases {
+        let dir = tempdir().unwrap();
+        let plugin_a = dir.path().join("plugin-a");
+        let plugin_b = dir.path().join("plugin-b");
+        for plugin in [&plugin_a, &plugin_b] {
+            std::fs::create_dir_all(plugin).unwrap();
+        }
+        for script in ["a-00-before.tmux", "a-10-fail.tmux", "a-20-after.tmux"] {
+            std::fs::write(plugin_a.join(script), "#!/bin/sh\n").unwrap();
+        }
+        std::fs::write(plugin_b.join("b.tmux"), "#!/bin/sh\n").unwrap();
+        let config_path = dir.path().join("tmup.kdl");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+plugin "{}" local=#true opt-prefix="a_" {{
+    env "A_BEFORE" "yes"
+    env "A_FAIL_ENV" "yes"
+    env "A_AFTER_ENV" "yes"
+    opt "fail" "yes"
+    opt "after" "yes"
+    bind "A-before" {{ shell "true" }}
+    bind "A-fail" {{ shell "true" }}
+    bind "A-after" {{ shell "true" }}
+}}
+plugin "{}" local=#true opt-prefix="b_" {{
+    env "B_ENV" "yes"
+    opt "ok" "yes"
+    bind "B-ok" {{ shell "true" }}
+}}
+"#,
+                plugin_a.display(),
+                plugin_b.display(),
+            ),
+        )
+        .unwrap();
+        let tmux_log = dir.path().join("tmux.log");
+        let fake_tmux_dir = write_selectively_failing_tmux(dir.path(), &tmux_log);
+        let path =
+            format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
+
+        let output = public_init_command(&config_path, dir.path(), &path)
+            .env("TMUX_FAIL_ARG", fail_arg)
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success(), "{fail_arg} must make init fail");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(&plugin_a.display().to_string()), "stderr:\n{stderr}");
+        assert!(stderr.contains("selected tmux failure"), "stderr:\n{stderr}");
+        let log = std::fs::read_to_string(&tmux_log).unwrap();
+        assert!(log.contains(fail_arg), "the failing command must reach tmux:\n{log}");
+        let lines: Vec<_> = log.lines().collect();
+        let earlier_index =
+            lines.iter().position(|line| line.contains(earlier_success)).unwrap_or_else(|| {
+                panic!("missing earlier successful action {earlier_success}:\n{log}")
+            });
+        assert!(
+            lines.get(earlier_index + 1).is_some_and(|line| *line == "applied"),
+            "an earlier successful effect must remain applied:\n{log}"
+        );
+        for skipped in skipped_after_failure {
+            assert!(!log.contains(skipped), "{skipped} must be skipped after {fail_arg}:\n{log}");
+        }
+        for neighbor_action in ["B_ENV", "@b_ok", "b.tmux", "B-ok"] {
+            assert!(
+                log.contains(neighbor_action),
+                "independent plugin action {neighbor_action} must continue after {fail_arg}:\n{log}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn public_init_omits_failed_remote_reconciliation_without_replacing_working_state() {
+    let dir = tempdir().unwrap();
+    make_remote_repo(dir.path());
+    let gitconfig = write_git_rewrite_config(dir.path());
+    let neighbor = dir.path().join("neighbor");
+    std::fs::create_dir_all(&neighbor).unwrap();
+    std::fs::write(neighbor.join("neighbor.tmux"), "#!/bin/sh\n").unwrap();
+    let config_path = dir.path().join("tmup.kdl");
+    std::fs::write(
+        &config_path,
+        r#"
+options { auto-install #true }
+plugin "https://example.com/test/plugin.git" build="printf old > built-version"
+"#,
+    )
+    .unwrap();
+    let tmux_log = dir.path().join("tmux.log");
+    let fake_tmux_dir = write_recording_tmux(dir.path(), &tmux_log);
+    let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
+
+    let initial = public_init_command(&config_path, dir.path(), &path)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .output()
+        .unwrap();
+    assert!(initial.status.success(), "stderr:\n{}", String::from_utf8_lossy(&initial.stderr));
+    let lock_path = dir.path().join("tmup.lock");
+    let original_lock = std::fs::read_to_string(&lock_path).unwrap();
+    std::fs::write(&tmux_log, "").unwrap();
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+options {{ auto-install #true }}
+plugin "https://example.com/test/plugin.git" build="printf new > built-version; exit 41" opt-prefix="remote_" {{
+    env "REMOTE_ENV" "must-not-load"
+    opt "mode" "must-not-load"
+    bind "REMOTE-bind" {{ shell "true" }}
+}}
+plugin "{}" local=#true opt-prefix="neighbor_" {{
+    env "NEIGHBOR_ENV" "loaded"
+    opt "mode" "loaded"
+    bind "NEIGHBOR-bind" {{ shell "true" }}
+}}
+"#,
+            neighbor.display(),
+        ),
+    )
+    .unwrap();
+
+    let output = public_init_command(&config_path, dir.path(), &path)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("example.com/test/plugin"), "stderr:\n{stderr}");
+    let log = std::fs::read_to_string(&tmux_log).unwrap();
+    for failed_plugin_action in
+        ["REMOTE_ENV", "@remote_mode", "example.com/test/plugin/init.tmux", "REMOTE-bind"]
+    {
+        assert!(
+            !log.contains(failed_plugin_action),
+            "failed plugin action {failed_plugin_action} must be omitted:\n{log}"
+        );
+    }
+    for neighbor_action in ["NEIGHBOR_ENV", "@neighbor_mode", "neighbor.tmux", "NEIGHBOR-bind"] {
+        assert!(
+            log.contains(neighbor_action),
+            "unaffected plugin action {neighbor_action} must continue:\n{log}"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&lock_path).unwrap(), original_lock);
+    let installed = dir.path().join("data/tmup/plugins/example.com/test/plugin");
+    assert_eq!(std::fs::read_to_string(installed.join("built-version")).unwrap(), "old");
+    let markers =
+        tmup::state::read_failure_markers(&dir.path().join("state/tmup/failures")).unwrap();
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].plugin_id, "example.com/test/plugin");
+
+    std::fs::write(&tmux_log, "").unwrap();
+    let known_failure = public_init_command(&config_path, dir.path(), &path)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .output()
+        .unwrap();
+
+    assert!(
+        known_failure.status.success(),
+        "a suppressed known failure is not a new sync failure: stderr:\n{}",
+        String::from_utf8_lossy(&known_failure.stderr)
+    );
+    let log = std::fs::read_to_string(&tmux_log).unwrap();
+    for failed_plugin_action in
+        ["REMOTE_ENV", "@remote_mode", "example.com/test/plugin/init.tmux", "REMOTE-bind"]
+    {
+        assert!(
+            !log.contains(failed_plugin_action),
+            "known-failed plugin action {failed_plugin_action} must remain omitted:\n{log}"
+        );
+    }
+    for neighbor_action in ["NEIGHBOR_ENV", "@neighbor_mode", "neighbor.tmux", "NEIGHBOR-bind"] {
+        assert!(
+            log.contains(neighbor_action),
+            "unaffected plugin action {neighbor_action} must continue after known failure:\n{log}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn public_init_aggregates_plugin_failures_but_keeps_global_setup_failure_operation_level() {
+    let dir = tempdir().unwrap();
+    let plugin_a = dir.path().join("plugin-a");
+    let plugin_b = dir.path().join("plugin-b");
+    let plugin_c = dir.path().join("plugin-c");
+    for plugin in [&plugin_a, &plugin_b, &plugin_c] {
+        std::fs::create_dir_all(plugin).unwrap();
+    }
+    let config_path = dir.path().join("tmup.kdl");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+plugin "{}" local=#true {{
+    env "A_FAIL_ENV" "yes"
+    env "A_AFTER" "no"
+}}
+plugin "{}" local=#true {{
+    env "B_FAIL_ENV" "yes"
+    env "B_AFTER" "no"
+}}
+plugin "{}" local=#true {{
+    env "C_CONTINUES" "yes"
+}}
+"#,
+            plugin_a.display(),
+            plugin_b.display(),
+            plugin_c.display(),
+        ),
+    )
+    .unwrap();
+    let tmux_log = dir.path().join("tmux.log");
+    let fake_tmux_dir = write_selectively_failing_tmux(dir.path(), &tmux_log);
+    let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
+
+    let plugin_failures = public_init_command(&config_path, dir.path(), &path)
+        .env("TMUX_FAIL_ARG", "FAIL_ENV")
+        .output()
+        .unwrap();
+
+    assert!(!plugin_failures.status.success());
+    let stderr = String::from_utf8_lossy(&plugin_failures.stderr);
+    assert!(stderr.contains("2 failure(s)"), "stderr:\n{stderr}");
+    assert!(stderr.contains(&plugin_a.display().to_string()), "stderr:\n{stderr}");
+    assert!(stderr.contains(&plugin_b.display().to_string()), "stderr:\n{stderr}");
+    let log = std::fs::read_to_string(&tmux_log).unwrap();
+    assert!(!log.contains("A_AFTER"), "{log}");
+    assert!(!log.contains("B_AFTER"), "{log}");
+    assert!(log.contains("C_CONTINUES"), "{log}");
+
+    std::fs::write(&tmux_log, "").unwrap();
+    let global_failure = public_init_command(&config_path, dir.path(), &path)
+        .env("TMUX_FAIL_ARG", "TMUX_PLUGIN_MANAGER_PATH")
+        .output()
+        .unwrap();
+
+    assert!(!global_failure.status.success());
+    let stderr = String::from_utf8_lossy(&global_failure.stderr);
+    assert!(stderr.contains("tmux set-environment failed"), "stderr:\n{stderr}");
+    assert!(!stderr.contains("init encountered"), "stderr:\n{stderr}");
+    let log = std::fs::read_to_string(&tmux_log).unwrap();
+    assert!(log.contains("TMUX_PLUGIN_MANAGER_PATH"), "{log}");
+    assert!(!log.contains("A_FAIL_ENV"), "global setup failure must abort plugin loading:\n{log}");
 }
 
 #[cfg(unix)]

@@ -4,19 +4,41 @@ use crate::config_mode::LoadEligibility;
 use crate::model::{EnvironmentOperation, PluginSource, PluginSpec};
 use crate::tmux::TmuxCommand;
 
-/// Build the full load plan: set the manager path, configure plugins, run `*.tmux` files, then bind keys.
-pub fn build_load_plan(
-    load_eligibility: LoadEligibility<'_>,
-    plugin_root: &Path,
-) -> Vec<TmuxCommand> {
-    let mut plan = Vec::new();
+/// One tmux command attributed to the plugin that declared or supplied it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginLoadCommand {
+    /// Canonical remote plugin ID, or the expanded path for a local plugin.
+    pub plugin_id: String,
+    /// Human-readable plugin name used in diagnostics.
+    pub plugin_name: String,
+    /// Tmux command to execute for the plugin.
+    pub command: TmuxCommand,
+}
 
+/// Globally phased tmux commands for one Init Session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadPlan {
+    /// Initial tmup-owned setup command that cannot be attributed to a plugin.
+    pub global_setup: TmuxCommand,
+    /// Plugin-attributable commands in global phase order.
+    pub plugin_commands: Vec<PluginLoadCommand>,
+}
+
+impl LoadPlan {
+    /// Iterate over every command in execution order.
+    pub fn iter(&self) -> impl Iterator<Item = &TmuxCommand> {
+        std::iter::once(&self.global_setup)
+            .chain(self.plugin_commands.iter().map(|entry| &entry.command))
+    }
+}
+
+/// Build the full load plan: set the manager path, configure plugins, run `*.tmux` files, then bind keys.
+pub fn build_load_plan(load_eligibility: LoadEligibility<'_>, plugin_root: &Path) -> LoadPlan {
     // 1. Set TMUX_PLUGIN_MANAGER_PATH with trailing slash
     let root_str = format!("{}/", plugin_root.display());
-    plan.push(TmuxCommand::SetEnvironment {
-        key: "TMUX_PLUGIN_MANAGER_PATH".into(),
-        value: root_str,
-    });
+    let global_setup =
+        TmuxCommand::SetEnvironment { key: "TMUX_PLUGIN_MANAGER_PATH".into(), value: root_str };
+    let mut plugin_commands = Vec::new();
 
     // 2. Configure each eligible plugin in declaration order.
     for (spec, load_eligible) in load_eligibility.plugins() {
@@ -26,23 +48,32 @@ pub fn build_load_plan(
         for operation in &spec.environment {
             match operation {
                 EnvironmentOperation::Set { name, value } => {
-                    plan.push(TmuxCommand::SetEnvironment {
-                        key: name.clone(),
-                        value: value.clone(),
-                    });
+                    push_plugin_command(
+                        &mut plugin_commands,
+                        spec,
+                        TmuxCommand::SetEnvironment { key: name.clone(), value: value.clone() },
+                    );
                 }
                 EnvironmentOperation::Unset { name } => {
-                    plan.push(TmuxCommand::UnsetEnvironment { key: name.clone() });
+                    push_plugin_command(
+                        &mut plugin_commands,
+                        spec,
+                        TmuxCommand::UnsetEnvironment { key: name.clone() },
+                    );
                 }
             }
         }
 
         // Apply opt settings
         for (key, value) in &spec.opts {
-            plan.push(TmuxCommand::SetOption {
-                key: format!("{}{}", spec.opt_prefix, key),
-                value: value.clone(),
-            });
+            push_plugin_command(
+                &mut plugin_commands,
+                spec,
+                TmuxCommand::SetOption {
+                    key: format!("{}{}", spec.opt_prefix, key),
+                    value: value.clone(),
+                },
+            );
         }
     }
 
@@ -56,7 +87,7 @@ pub fn build_load_plan(
         // Find and sort *.tmux files
         let tmux_scripts = find_tmux_scripts(&plugin_dir);
         for script in tmux_scripts {
-            plan.push(TmuxCommand::RunShell { script });
+            push_plugin_command(&mut plugin_commands, spec, TmuxCommand::RunShell { script });
         }
     }
 
@@ -67,17 +98,33 @@ pub fn build_load_plan(
         }
         let plugin_dir = resolved_plugin_dir(spec, plugin_root);
         for binding in &spec.bindings {
-            plan.push(TmuxCommand::BindKey {
-                options: binding.options.clone(),
-                key: binding.key.clone(),
-                plugin_dir: plugin_dir.clone(),
-                shell: binding.shell.clone(),
-                background: binding.background,
-            });
+            push_plugin_command(
+                &mut plugin_commands,
+                spec,
+                TmuxCommand::BindKey {
+                    options: binding.options.clone(),
+                    key: binding.key.clone(),
+                    plugin_dir: plugin_dir.clone(),
+                    shell: binding.shell.clone(),
+                    background: binding.background,
+                },
+            );
         }
     }
 
-    plan
+    LoadPlan { global_setup, plugin_commands }
+}
+
+fn push_plugin_command(
+    commands: &mut Vec<PluginLoadCommand>,
+    spec: &PluginSpec,
+    command: TmuxCommand,
+) {
+    let plugin_id = match &spec.source {
+        PluginSource::Remote { id, .. } => id.clone(),
+        PluginSource::Local { path } => path.clone(),
+    };
+    commands.push(PluginLoadCommand { plugin_id, plugin_name: spec.name.clone(), command });
 }
 
 fn resolved_plugin_dir(spec: &PluginSpec, plugin_root: &Path) -> std::path::PathBuf {

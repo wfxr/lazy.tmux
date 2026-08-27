@@ -6,10 +6,12 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Args;
 use tmup::config_mode::{self, ConfigMode, ResolutionIntent, TpmConfigPolicy};
+use tmup::loader::{LoadPlan, PluginLoadCommand};
 use tmup::lockfile::{self, LockFile};
-use tmup::progress::{NullReporter, OperationStage, ProgressEvent, ProgressReporter};
+use tmup::progress::{NullReporter, OperationStage, PluginStage, ProgressEvent, ProgressReporter};
 use tmup::state::{OperationLock, Paths};
 use tmup::sync::{self, SyncMode, SyncPolicy};
+#[cfg(test)]
 use tmup::tmux::TmuxCommand;
 use tmup::{loader, progress};
 
@@ -108,7 +110,17 @@ trait TmuxAdapter {
     fn host_child(&mut self, handoff: ChildHandoff<'_>) -> Result<ChildDisposition>;
     fn display_fallback(&mut self, message: &str);
     fn display_waiting(&mut self);
-    fn execute_load_plan(&mut self, plan: &[TmuxCommand]) -> Result<()>;
+    fn execute_load_plan(
+        &mut self,
+        plan: &LoadPlan,
+        excluded_plugin_ids: &HashSet<String>,
+    ) -> Result<Vec<PluginLoadFailure>>;
+}
+
+#[derive(Debug)]
+struct PluginLoadFailure {
+    entry: PluginLoadCommand,
+    error: anyhow::Error,
 }
 
 async fn resume_with_adapter(
@@ -790,8 +802,25 @@ impl TmuxAdapter for ProductionTmux {
         let _ = tmup::tmux::display_message("tmup: waiting for another operation...");
     }
 
-    fn execute_load_plan(&mut self, plan: &[TmuxCommand]) -> Result<()> {
-        tmup::tmux::execute_plan(plan)
+    fn execute_load_plan(
+        &mut self,
+        plan: &LoadPlan,
+        excluded_plugin_ids: &HashSet<String>,
+    ) -> Result<Vec<PluginLoadFailure>> {
+        tmup::tmux::execute(&plan.global_setup)?;
+
+        let mut failed_plugin_ids = excluded_plugin_ids.clone();
+        let mut failures = Vec::new();
+        for entry in &plan.plugin_commands {
+            if failed_plugin_ids.contains(&entry.plugin_id) {
+                continue;
+            }
+            if let Err(error) = tmup::tmux::execute(&entry.command) {
+                failed_plugin_ids.insert(entry.plugin_id.clone());
+                failures.push(PluginLoadFailure { entry: entry.clone(), error });
+            }
+        }
+        Ok(failures)
     }
 }
 
@@ -827,12 +856,29 @@ async fn execute_core(
         .load_eligibility()
         .context("Init Session configuration did not resolve Load Eligibility")?;
     let load_plan = loader::build_load_plan(load_eligibility, &loaded.paths.plugin_root);
-    tmux.execute_load_plan(&load_plan)?;
+    let runtime_failures =
+        tmux.execute_load_plan(&load_plan, sync_outcome.load_excluded_plugin_ids())?;
+    let mut plugin_failures = sync_outcome.plugin_failures;
+    for failure in runtime_failures {
+        let PluginLoadFailure { entry, error } = failure;
+        let PluginLoadCommand { plugin_id, plugin_name, command } = entry;
+        let (summary, detail) = progress::summarize_error(&error);
+        let command_name = command.to_args().into_iter().next().unwrap_or_else(|| "tmux".into());
+        reporter.report(ProgressEvent::PluginFailed {
+            id: &plugin_id,
+            name: &plugin_name,
+            stage: Some(PluginStage::Loading),
+            summary,
+            detail,
+            context: vec![("tmux_command", command_name)],
+        });
+        plugin_failures.push(format!("{plugin_id}: {error}"));
+    }
 
-    if sync_outcome.is_clean() {
+    if plugin_failures.is_empty() {
         Ok(Outcome::Completed)
     } else {
-        Ok(Outcome::CompletedWithPluginFailures(sync_outcome.plugin_failures))
+        Ok(Outcome::CompletedWithPluginFailures(plugin_failures))
     }
 }
 
@@ -973,13 +1019,17 @@ mod tests {
             self.requests.push(Request::Waiting);
         }
 
-        fn execute_load_plan(&mut self, plan: &[TmuxCommand]) -> Result<()> {
+        fn execute_load_plan(
+            &mut self,
+            plan: &LoadPlan,
+            _excluded_plugin_ids: &HashSet<String>,
+        ) -> Result<Vec<PluginLoadFailure>> {
             if let Some(lock_path) = &self.expected_lock_path {
                 self.load_while_locked =
                     tmup::state::OperationLock::try_acquire(lock_path)?.is_none();
             }
-            self.requests.push(Request::Load(plan.to_vec()));
-            Ok(())
+            self.requests.push(Request::Load(plan.iter().cloned().collect()));
+            Ok(Vec::new())
         }
     }
 

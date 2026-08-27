@@ -28,6 +28,8 @@ pub enum PluginStage {
     CheckingOut,
     /// Build and publish staged content.
     Applying,
+    /// Apply plugin-attributable runtime configuration to tmux.
+    Loading,
 }
 
 /// Stage-specific detail payload for structured plugin progress updates.
@@ -223,6 +225,7 @@ impl std::fmt::Display for PluginStage {
             Self::Resolving => write!(f, "resolving"),
             Self::CheckingOut => write!(f, "checking out"),
             Self::Applying => write!(f, "applying"),
+            Self::Loading => write!(f, "loading"),
         }
     }
 }
