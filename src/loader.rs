@@ -1,10 +1,10 @@
 use std::path::Path;
 
 use crate::config_mode::LoadEligibility;
-use crate::model::PluginSource;
+use crate::model::{EnvironmentOperation, PluginSource};
 use crate::tmux::TmuxCommand;
 
-/// Build the full load plan: set env, then for each plugin set opts + run *.tmux files.
+/// Build the full load plan: set the manager path, configure plugins, then run `*.tmux` files.
 pub fn build_load_plan(
     load_eligibility: LoadEligibility<'_>,
     plugin_root: &Path,
@@ -18,11 +18,25 @@ pub fn build_load_plan(
         value: root_str,
     });
 
-    // 2. For each plugin in declaration order: apply opts, then run *.tmux
+    // 2. Configure each eligible plugin in declaration order.
     for (spec, load_eligible) in load_eligibility.plugins() {
         if !load_eligible {
             continue;
         }
+        for operation in &spec.environment {
+            match operation {
+                EnvironmentOperation::Set { name, value } => {
+                    plan.push(TmuxCommand::SetEnvironment {
+                        key: name.clone(),
+                        value: value.clone(),
+                    });
+                }
+                EnvironmentOperation::Unset { name } => {
+                    plan.push(TmuxCommand::UnsetEnvironment { key: name.clone() });
+                }
+            }
+        }
+
         // Apply opt settings
         for (key, value) in &spec.opts {
             plan.push(TmuxCommand::SetOption {
@@ -30,8 +44,13 @@ pub fn build_load_plan(
                 value: value.clone(),
             });
         }
+    }
 
-        // Determine plugin directory
+    // 3. Load scripts only after every eligible plugin's environment and options are configured.
+    for (spec, load_eligible) in load_eligibility.plugins() {
+        if !load_eligible {
+            continue;
+        }
         let plugin_dir = match &spec.source {
             PluginSource::Remote { id, .. } => plugin_root.join(id),
             PluginSource::Local { path } => std::path::PathBuf::from(path),

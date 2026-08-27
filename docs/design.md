@@ -77,16 +77,22 @@ behind this boundary.
 
 - Enable Conditions project declarations into one Effective Plugin
   Specification per Execution Host.
-- Load Conditions only control whether an Init Session sets a plugin's options
-  and runs its scripts; they do not change managed state.
+- Load Conditions only control whether an Init Session applies a plugin's
+  environment operations and options and runs its scripts; they do not change
+  managed state.
 - Conditional loading is scoped to the tmux server's Execution Host, not to
   individual clients.
 - A false Load Condition does not undo effects from an earlier load.
 
 ## TPM Compatibility Contract (Stable Surface)
 
-- Compatibility is defined as: for plugins with Load Eligibility, set tmux
-  options and load plugin `*.tmux` scripts in effective declaration order.
+- Compatibility is defined as: initialize the plugin manager path, then apply
+  each plugin's ordered tmux environment operations and options for all plugins
+  with Load Eligibility before loading their `*.tmux` scripts in effective
+  declaration order.
+- Runtime environment declarations are replayed only by `init`. They do not
+  affect lock fingerprints, and removing a declaration does not clean up an
+  effect from an earlier Init Session.
 - tmup does not promise TPM's internal repository layout or helper-script
   behavior.
 - Plugins that depend on TPM internals are outside tmup's compatibility target.

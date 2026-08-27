@@ -29,6 +29,7 @@ fn make_plugin(
         tracking,
         build: build.map(String::from),
         opts: vec![],
+        environment: vec![],
     }
 }
 

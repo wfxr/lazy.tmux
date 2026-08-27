@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail, ensure};
 use kdl::{KdlDocument, KdlEntry};
 
-use crate::model::{Config, Options, PluginSource, PluginSpec, Tracking};
+use crate::model::{Config, EnvironmentOperation, Options, PluginSource, PluginSpec, Tracking};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Condition {
@@ -118,8 +118,9 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
         Tracking::DefaultBranch
     };
 
-    // Parse child nodes: opt entries and build (as child node)
+    // Parse child nodes: opt entries, environment operations, and build (as child node)
     let mut opts = Vec::new();
+    let mut environment = Vec::new();
     let mut child_build: Option<String> = None;
     if let Some(children) = node.children() {
         for child in children.nodes() {
@@ -136,6 +137,9 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
                         .context("opt requires a value string")?
                         .to_string();
                     opts.push((key, value));
+                }
+                "env" | "unset-env" => {
+                    environment.push(parse_environment_operation(child, &raw)?);
                 }
                 "build" => {
                     ensure!(
@@ -196,12 +200,63 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
             tracking,
             build,
             opts,
+            environment,
         }
     } else {
-        PluginSpec::from_remote(raw, explicit_name, opt_prefix, tracking, build, opts)?
+        let mut spec =
+            PluginSpec::from_remote(raw, explicit_name, opt_prefix, tracking, build, opts)?;
+        spec.environment = environment;
+        spec
     };
 
     Ok(PluginDeclaration { spec: source, enabled, load_condition })
+}
+
+fn parse_environment_operation(node: &kdl::KdlNode, plugin: &str) -> Result<EnvironmentOperation> {
+    let kind = node.name().value();
+    let argument_count = match kind {
+        "env" => 2,
+        "unset-env" => 1,
+        _ => unreachable!("only recognized environment nodes are parsed here"),
+    };
+    ensure!(node.children().is_none(), "plugin \"{plugin}\": {kind} must not have child nodes");
+    ensure!(
+        node.entries().iter().all(|entry| entry.name().is_none()),
+        "plugin \"{plugin}\": {kind} must not have properties"
+    );
+    ensure!(
+        node.entries().len() == argument_count,
+        "plugin \"{plugin}\": {kind} requires exactly {argument_count} string argument{}",
+        if argument_count == 1 { "" } else { "s" }
+    );
+    ensure!(
+        node.entries().iter().all(|entry| entry.ty().is_none()),
+        "plugin \"{plugin}\": {kind} does not support KDL type annotations"
+    );
+    let arguments =
+        node.entries()
+            .iter()
+            .map(|entry| {
+                entry.value().as_string().map(str::to_owned).with_context(|| {
+                    format!("plugin \"{plugin}\": {kind} arguments must be strings")
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+    let mut arguments = arguments.into_iter();
+    let name =
+        arguments.next().with_context(|| format!("plugin \"{plugin}\": {kind} requires a name"))?;
+    ensure!(!name.is_empty(), "plugin \"{plugin}\": {kind} name must not be empty");
+
+    match kind {
+        "env" => {
+            let value = arguments
+                .next()
+                .with_context(|| format!("plugin \"{plugin}\": env requires a value"))?;
+            Ok(EnvironmentOperation::Set { name, value })
+        }
+        "unset-env" => Ok(EnvironmentOperation::Unset { name }),
+        _ => unreachable!("only recognized environment nodes are parsed here"),
+    }
 }
 
 pub(crate) fn validate_unique_ids<'a>(

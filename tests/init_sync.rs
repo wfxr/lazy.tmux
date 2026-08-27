@@ -38,6 +38,37 @@ exit 0
 }
 
 #[cfg(unix)]
+fn write_recording_tmux(root: &Path, log: &Path) -> PathBuf {
+    let bin_dir = root.join("bin-recording-tmux");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let script = bin_dir.join("tmux");
+    std::fs::write(
+        &script,
+        format!(
+            r#"#!/bin/sh
+case "$1" in
+  set-environment|set|run-shell)
+    printf 'command\n' >> '{log}'
+    for arg do
+      printf 'arg=<%s>\n' "$arg" >> '{log}'
+    done
+    printf 'end\n' >> '{log}'
+    ;;
+  -V) printf 'tmux 1.9\n' ;;
+esac
+exit 0
+"#,
+            log = log.display(),
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).unwrap();
+    bin_dir
+}
+
+#[cfg(unix)]
 fn write_lock_probe_tmux(root: &Path) -> (PathBuf, PathBuf) {
     let bin_dir = root.join("bin-lock-probe-tmux");
     let handshake = root.join("init-lock-handshake");
@@ -120,6 +151,7 @@ fn make_plugin(clone_url: &str, tracking: Tracking, build: Option<&str>) -> Plug
         tracking,
         build: build.map(String::from),
         opts: vec![],
+        environment: vec![],
     }
 }
 
@@ -325,6 +357,144 @@ fn public_init_processes_serialize_through_tmux_loading() {
     assert!(
         handshake.join("second-loading").exists(),
         "the second public init should load after the first releases the operation lock"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn public_init_applies_literal_environment_operations_before_all_plugin_scripts() {
+    let dir = tempdir().unwrap();
+    make_remote_repo(dir.path());
+    let gitconfig = write_git_rewrite_config(dir.path());
+    let local_plugin = dir.path().join("local-plugin");
+    let skipped_plugin = dir.path().join("skipped-plugin");
+    for plugin in [&local_plugin, &skipped_plugin] {
+        std::fs::create_dir_all(plugin).unwrap();
+        std::fs::write(plugin.join("init.tmux"), "#!/bin/sh\n").unwrap();
+    }
+    let config_path = dir.path().join("tmup.kdl");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+options {{ auto-install #true }}
+plugin "https://example.com/test/plugin.git" opt-prefix="remote_" {{
+    env "SHARED" "remote"
+    env "LITERAL" "$HOME ~ ${{PLUGIN_DIR}}"
+    unset-env "STALE"
+    env "TMUX_PLUGIN_MANAGER_PATH" "plugin-owned"
+    opt "mode" "one"
+}}
+plugin "{local_plugin}" local=#true opt-prefix="local_" {{
+    env "SHARED" "local"
+    unset-env "SHARED"
+    env "SHARED" ""
+    unset-env "TMUX_PLUGIN_MANAGER_PATH"
+    opt "mode" "two"
+}}
+plugin "{skipped_plugin}" local=#true cond=#false {{
+    env "SKIPPED" "no"
+}}
+plugin "user/disabled" enabled=#false {{
+    env "DISABLED" "no"
+}}
+"#,
+            local_plugin = local_plugin.display(),
+            skipped_plugin = skipped_plugin.display(),
+        ),
+    )
+    .unwrap();
+    let tmux_log = dir.path().join("tmux.log");
+    let fake_tmux_dir = write_recording_tmux(dir.path(), &tmux_log);
+    let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
+
+    let output = public_init_command(&config_path, dir.path(), &path)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .env("HOME", dir.path().join("runtime-home"))
+        .env("PLUGIN_DIR", "runtime-plugin-dir")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "stderr:\n{}", String::from_utf8_lossy(&output.stderr));
+    let plugin_root = dir.path().join("data/tmup/plugins");
+    assert_eq!(
+        std::fs::read_to_string(&tmux_log).unwrap(),
+        format!(
+            "command\n\
+arg=<set-environment>\n\
+arg=<-g>\n\
+arg=<TMUX_PLUGIN_MANAGER_PATH>\n\
+arg=<{plugin_root}/>\n\
+end\n\
+command\n\
+arg=<set-environment>\n\
+arg=<-g>\n\
+arg=<SHARED>\n\
+arg=<remote>\n\
+end\n\
+command\n\
+arg=<set-environment>\n\
+arg=<-g>\n\
+arg=<LITERAL>\n\
+arg=<$HOME ~ ${{PLUGIN_DIR}}>\n\
+end\n\
+command\n\
+arg=<set-environment>\n\
+arg=<-gu>\n\
+arg=<STALE>\n\
+end\n\
+command\n\
+arg=<set-environment>\n\
+arg=<-g>\n\
+arg=<TMUX_PLUGIN_MANAGER_PATH>\n\
+arg=<plugin-owned>\n\
+end\n\
+command\n\
+arg=<set>\n\
+arg=<-g>\n\
+arg=<@remote_mode>\n\
+arg=<one>\n\
+end\n\
+command\n\
+arg=<set-environment>\n\
+arg=<-g>\n\
+arg=<SHARED>\n\
+arg=<local>\n\
+end\n\
+command\n\
+arg=<set-environment>\n\
+arg=<-gu>\n\
+arg=<SHARED>\n\
+end\n\
+command\n\
+arg=<set-environment>\n\
+arg=<-g>\n\
+arg=<SHARED>\n\
+arg=<>\n\
+end\n\
+command\n\
+arg=<set-environment>\n\
+arg=<-gu>\n\
+arg=<TMUX_PLUGIN_MANAGER_PATH>\n\
+end\n\
+command\n\
+arg=<set>\n\
+arg=<-g>\n\
+arg=<@local_mode>\n\
+arg=<two>\n\
+end\n\
+command\n\
+arg=<run-shell>\n\
+arg=<'{plugin_root}/example.com/test/plugin/init.tmux'>\n\
+end\n\
+command\n\
+arg=<run-shell>\n\
+arg=<'{local_plugin}/init.tmux'>\n\
+end\n",
+            plugin_root = plugin_root.display(),
+            local_plugin = local_plugin.display(),
+        )
     );
 }
 

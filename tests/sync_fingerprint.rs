@@ -47,6 +47,34 @@ plugin "https://github.com/user/beta.git"
 }
 
 #[test]
+fn environment_declarations_do_not_affect_plugin_or_config_fingerprints() {
+    let first = parse_config(
+        r#"
+plugin "user/repo" {
+    env "MODE" "one"
+    unset-env "LEGACY"
+}
+"#,
+    )
+    .unwrap();
+    let second = parse_config(
+        r#"
+plugin "user/repo" {
+    unset-env "MODE"
+    env "MODE" "two"
+}
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        remote_plugin_config_hash(&first.plugins[0]),
+        remote_plugin_config_hash(&second.plugins[0])
+    );
+    assert_eq!(config_fingerprint(&first), config_fingerprint(&second));
+}
+
+#[test]
 fn config_fingerprint_changes_when_build_changes() {
     let cfg_a = parse_config(r#"plugin "user/repo" build="make install""#).unwrap();
     let cfg_b = parse_config(r#"plugin "user/repo" build="just build""#).unwrap();

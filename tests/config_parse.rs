@@ -1,4 +1,5 @@
 use tmup::config::parse_config;
+use tmup::model::EnvironmentOperation;
 
 #[test]
 fn parses_remote_and_local_plugins() {
@@ -49,6 +50,64 @@ plugin "catppuccin/tmux" opt-prefix="catppuccin_" {
     assert_eq!(p.opts.len(), 2);
     assert_eq!(p.opts[0], ("flavor".into(), "mocha".into()));
     assert_eq!(p.opts[1], ("window_text".into(), "#W".into()));
+}
+
+#[test]
+fn parses_ordered_environment_operations_for_remote_and_local_plugins() {
+    let cfg = parse_config(
+        r#"
+plugin "user/remote" {
+    env "MODE" "remote"
+    unset-env "LEGACY_MODE"
+    env "MODE" ""
+}
+plugin "/opt/plugins/local" local=#true {
+    unset-env "MODE"
+}
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        cfg.plugins[0].environment,
+        vec![
+            EnvironmentOperation::Set { name: "MODE".into(), value: "remote".into() },
+            EnvironmentOperation::Unset { name: "LEGACY_MODE".into() },
+            EnvironmentOperation::Set { name: "MODE".into(), value: "".into() },
+        ]
+    );
+    assert_eq!(
+        cfg.plugins[1].environment,
+        vec![EnvironmentOperation::Unset { name: "MODE".into() }]
+    );
+}
+
+#[test]
+fn rejects_malformed_recognized_environment_nodes() {
+    let cases = [
+        (r#"plugin "user/repo" { env "NAME" }"#, "exactly 2 string arguments"),
+        (r#"plugin "user/repo" { env "NAME" "value" "extra" }"#, "exactly 2 string arguments"),
+        (r#"plugin "user/repo" { env 42 "value" }"#, "arguments must be strings"),
+        (r#"plugin "user/repo" { env "NAME" #true }"#, "arguments must be strings"),
+        (r#"plugin "user/repo" { env "" "value" }"#, "env name must not be empty"),
+        (r#"plugin "user/repo" { unset-env }"#, "exactly 1 string argument"),
+        (r#"plugin "user/repo" { unset-env "" }"#, "unset-env name must not be empty"),
+        (r#"plugin "user/repo" { unset-env 42 }"#, "arguments must be strings"),
+        (r#"plugin "user/repo" { env "NAME" "value" future=#true }"#, "must not have properties"),
+        (
+            r#"plugin "user/repo" { env (future)"NAME" "value" }"#,
+            "does not support KDL type annotations",
+        ),
+        (
+            "plugin \"user/repo\" { unset-env \"NAME\" { future #true } }",
+            "must not have child nodes",
+        ),
+    ];
+
+    for (input, expected) in cases {
+        let error = parse_config(input).unwrap_err();
+        assert!(error.to_string().contains(expected), "input={input:?}, error={error:#}");
+    }
 }
 
 #[test]

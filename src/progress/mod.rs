@@ -39,6 +39,7 @@ pub(crate) mod test_support {
             tracking: Tracking::DefaultBranch,
             build: None,
             opts: Vec::new(),
+            environment: Vec::new(),
         }
     }
 }

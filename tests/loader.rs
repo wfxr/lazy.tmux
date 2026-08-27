@@ -103,6 +103,54 @@ plugin "user/plugin-b"
 }
 
 #[test]
+fn loader_applies_plugin_setup_before_loading_any_scripts() {
+    let dir = tempdir().unwrap();
+    let plugin_root = dir.path().join("plugins");
+    for name in ["plugin-a", "plugin-b"] {
+        let plugin_dir = plugin_root.join(format!("github.com/user/{name}"));
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join(format!("{name}.tmux")), "#!/bin/sh").unwrap();
+    }
+    let config = resolve_config(
+        dir.path(),
+        r#"
+plugin "user/plugin-a" opt-prefix="a_" {
+    env "SHARED" "first"
+    unset-env "LEGACY"
+    opt "mode" "one"
+}
+plugin "user/plugin-b" opt-prefix="b_" {
+    env "SHARED" "second"
+    opt "mode" "two"
+}
+"#,
+    );
+
+    let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
+
+    assert_eq!(
+        plan,
+        vec![
+            TmuxCommand::SetEnvironment {
+                key: "TMUX_PLUGIN_MANAGER_PATH".into(),
+                value: format!("{}/", plugin_root.display()),
+            },
+            TmuxCommand::SetEnvironment { key: "SHARED".into(), value: "first".into() },
+            TmuxCommand::UnsetEnvironment { key: "LEGACY".into() },
+            TmuxCommand::SetOption { key: "a_mode".into(), value: "one".into() },
+            TmuxCommand::SetEnvironment { key: "SHARED".into(), value: "second".into() },
+            TmuxCommand::SetOption { key: "b_mode".into(), value: "two".into() },
+            TmuxCommand::RunShell {
+                script: plugin_root.join("github.com/user/plugin-a/plugin-a.tmux")
+            },
+            TmuxCommand::RunShell {
+                script: plugin_root.join("github.com/user/plugin-b/plugin-b.tmux")
+            },
+        ]
+    );
+}
+
+#[test]
 fn loader_handles_missing_plugin_dir() {
     let dir = tempdir().unwrap();
     let plugin_root = dir.path().join("plugins");
@@ -166,7 +214,11 @@ fn loader_skips_options_and_scripts_for_plugins_without_load_eligibility() {
         dir.path(),
         r#"
 plugin "user/load-first" opt-prefix="first_" { opt "mode" "yes" }
-plugin "user/skip" cond=#false opt-prefix="skip_" { opt "mode" "no" }
+plugin "user/skip" cond=#false opt-prefix="skip_" {
+    env "SKIP_ENV" "no"
+    unset-env "SKIP_UNSET"
+    opt "mode" "no"
+}
 plugin "user/load-last" opt-prefix="last_" { opt "mode" "yes" }
 "#,
     );
@@ -177,7 +229,8 @@ plugin "user/load-last" opt-prefix="last_" { opt "mode" "yes" }
     assert!(!plan.iter().any(|command| match command {
         TmuxCommand::SetOption { key, .. } => key.starts_with("skip_"),
         TmuxCommand::RunShell { script } => script.ends_with("skip.tmux"),
-        TmuxCommand::SetEnvironment { .. } => false,
+        TmuxCommand::SetEnvironment { key, .. } => key == "SKIP_ENV",
+        TmuxCommand::UnsetEnvironment { key } => key == "SKIP_UNSET",
     }));
     let scripts: Vec<_> = plan
         .iter()

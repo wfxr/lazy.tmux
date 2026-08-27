@@ -268,6 +268,13 @@ plugin "catppuccin/tmux" opt-prefix="catppuccin_" {
     opt "window_text" "#W"
 }
 
+// Configure the tmux global environment before plugin scripts run
+plugin "wfxr/tmux-fzf" {
+    env "TMUX_FZF_LAUNCH_KEY" "C-f"
+    env "TMUX_FZF_OPTIONS" "-p -w 62% -h 38% -m --border=none"
+    unset-env "OLD_TMUX_FZF_OPTION"
+}
+
 // Non-GitHub source
 plugin "https://gitlab.com/user/my-plugin.git"
 
@@ -323,6 +330,30 @@ plugin "company/remote-tools" cond=#"[ -n "$SSH_CLIENT" ]"#
 > `cond` values, predicate text, and Load Eligibility do not affect lock
 > fingerprints.
 
+### Plugin child nodes
+
+Plugin child nodes configure setup that belongs to one plugin. They apply to
+remote and local plugins with Load Eligibility during `tmup init`.
+
+| Child | Arguments | Description |
+|-------|-----------|-------------|
+| `opt` | key string, value string | Set `@{opt-prefix}{key}` in the tmux global options |
+| `env` | non-empty name string, value string | Set a value in the tmux global environment; the value may be empty |
+| `unset-env` | non-empty name string | Remove a value from the tmux global environment |
+| `build` | command string | Alternative child form of the `build` property |
+
+`env` values are literal. tmup doesn't expand shell syntax, `~`, process
+environment variables, or plugin-directory placeholders in them. Environment
+operations retain their declaration order, so repeated names use tmux's normal
+last-write-wins behavior. No name is reserved: a plugin may overwrite or unset
+`TMUX_PLUGIN_MANAGER_PATH` after tmup initializes it, which can affect later
+plugin scripts.
+
+Environment operations are replayed only by `tmup init`. Removing an `env`
+declaration doesn't remove a value that an earlier Init Session set. Add an
+explicit `unset-env` or restart the tmux server when you need to clear it. tmup
+doesn't roll back environment changes if a later load command fails.
+
 ### Conditional plugins
 
 Conditional plugin declarations separate whether tmup manages a plugin from
@@ -347,10 +378,10 @@ disabled, `sync` drops its lock entry and a later `clean` may remove its managed
 checkout.
 
 `cond=#false` keeps the plugin managed, installed, built, updated, and locked.
-During `init`, tmup skips both its options and its `*.tmux` scripts. Installation
-or build failures still make `init` return a non-zero status. Changing `cond`
-from true to false does not undo effects from an earlier load; restart the tmux
-server when you need to clear those effects.
+During `init`, tmup skips its environment operations, options, and `*.tmux`
+scripts. Installation or build failures still make `init` return a non-zero
+status. Changing `cond` from true to false does not undo effects from an earlier
+load; restart the tmux server when you need to clear those effects.
 
 String predicates run with `/bin/sh -c`, inherit the tmup process environment,
 use the configuration directory as their working directory, and time out after
@@ -399,7 +430,7 @@ tmux set -g @{opt-prefix}{key} "{value}"
 ## Commands
 
 ```
-tmup init               # Startup path: install missing, apply opts, load plugins
+tmup init               # Startup path: install missing, configure and load plugins
 tmup sync [id]          # Reconcile config into tmup.lock and plugin dirs
 tmup install [id]       # Install missing remote plugins
 tmup update [id]        # Advance unchanged floating selectors after sync
@@ -425,8 +456,9 @@ Designed for `run-shell "tmup init"` in `.tmux.conf`.
 4. **Respect init policy** — newly declared remote plugins are installed only
    when `auto-install=true`. Use `tmup clean` to remove undeclared plugin
    directories.
-5. **Load tmux state** — for plugins with Load Eligibility, set options and
-   source `*.tmux` files after sync.
+5. **Load tmux state** — initialize `TMUX_PLUGIN_MANAGER_PATH`, apply every
+   eligible plugin's ordered environment operations and options in declaration
+   order, then source all eligible plugins' sorted `*.tmux` files.
 
 `init` never advances floating selectors beyond what config declares. Known
 build failures are still recorded and surfaced, but because startup begins with

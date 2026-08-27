@@ -13,6 +13,11 @@ pub enum TmuxCommand {
         /// Environment variable value.
         value: String,
     },
+    /// Unset a global tmux environment variable.
+    UnsetEnvironment {
+        /// Environment variable name.
+        key: String,
+    },
     /// Set a global tmux option (prefixed with `@`).
     SetOption {
         /// Option name.
@@ -33,6 +38,9 @@ impl TmuxCommand {
         match self {
             Self::SetEnvironment { key, value } => {
                 vec!["set-environment".into(), "-g".into(), key.clone(), value.clone()]
+            }
+            Self::UnsetEnvironment { key } => {
+                vec!["set-environment".into(), "-gu".into(), key.clone()]
             }
             Self::SetOption { key, value } => {
                 vec!["set".into(), "-g".into(), format!("@{key}"), value.clone()]

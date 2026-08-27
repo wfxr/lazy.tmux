@@ -10,7 +10,7 @@ pub mod config_mode;
 pub mod config_tpm;
 /// Async git operations (clone, fetch, checkout, publish).
 pub mod git;
-/// Tmux load-plan construction (set env, apply opts, source `*.tmux` scripts).
+/// Tmux load-plan construction (apply environment and options, then source `*.tmux` scripts).
 pub mod loader;
 /// Lock file persistence (read, write, fingerprint).
 pub mod lockfile;

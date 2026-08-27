@@ -58,6 +58,23 @@ pub enum Tracking {
     Commit(String),
 }
 
+/// An ordered tmux global environment operation declared by a plugin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvironmentOperation {
+    /// Set a global environment variable to a literal value.
+    Set {
+        /// Environment variable name.
+        name: String,
+        /// Literal environment variable value.
+        value: String,
+    },
+    /// Remove a global environment variable.
+    Unset {
+        /// Environment variable name.
+        name: String,
+    },
+}
+
 /// Full specification for a single plugin entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginSpec {
@@ -73,6 +90,8 @@ pub struct PluginSpec {
     pub build: Option<String>,
     /// Extra key-value options passed to the plugin.
     pub opts: Vec<(String, String)>,
+    /// Ordered global tmux environment operations applied while loading the plugin.
+    pub environment: Vec<EnvironmentOperation>,
 }
 
 impl Config {
@@ -108,6 +127,7 @@ impl PluginSpec {
             tracking,
             build,
             opts,
+            environment: Vec::new(),
         })
     }
 
