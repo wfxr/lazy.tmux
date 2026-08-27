@@ -273,6 +273,10 @@ plugin "wfxr/tmux-fzf" {
     env "TMUX_FZF_LAUNCH_KEY" "C-f"
     env "TMUX_FZF_OPTIONS" "-p -w 62% -h 38% -m --border=none"
     unset-env "OLD_TMUX_FZF_OPTION"
+    bind "C-w" {
+        options "-n" "-r"
+        shell "scripts/session.sh attach" background=#true
+    }
 }
 
 // Non-GitHub source
@@ -321,9 +325,10 @@ plugin "company/remote-tools" cond=#"[ -n "$SSH_CLIENT" ]"#
 >
 > Sync hashes the canonical remote identity, tracking selector, and `build`.
 > Equivalent remote spellings such as `.git` vs no `.git` do not trigger sync.
-> Comments, formatting, `name`, `opt`, `opt-prefix`, and local-plugin-only
-> changes do not trigger sync. The configuration fingerprint covers remote
-> plugins in the resulting Effective Plugin Specification. Changing an
+> Comments, formatting, `name`, `opt`, `opt-prefix`, `env`, `unset-env`,
+> `bind`, and local-plugin-only changes do not trigger sync. The configuration
+> fingerprint covers remote plugins in the resulting Effective Plugin
+> Specification. Changing an
 > `enabled` predicate while it continues to evaluate true does not affect the
 > fingerprint. If `enabled` becomes false for a remote plugin, that plugin
 > leaves the specification and lock snapshot, which changes the fingerprint.
@@ -340,6 +345,7 @@ remote and local plugins with Load Eligibility during `tmup init`.
 | `opt` | key string, value string | Set `@{opt-prefix}{key}` in the tmux global options |
 | `env` | non-empty name string, value string | Set a value in the tmux global environment; the value may be empty |
 | `unset-env` | non-empty name string | Remove a value from the tmux global environment |
+| `bind` | non-empty key string, child block | Register one plugin-scoped shell binding after all plugin scripts load |
 | `build` | command string | Alternative child form of the `build` property |
 
 `env` values are literal. tmup doesn't expand shell syntax, `~`, process
@@ -353,6 +359,45 @@ Environment operations are replayed only by `tmup init`. Removing an `env`
 declaration doesn't remove a value that an earlier Init Session set. Add an
 explicit `unset-env` or restart the tmux server when you need to clear it. tmup
 doesn't roll back environment changes if a later load command fails.
+
+Each `bind` block requires exactly one `shell` child and accepts at most one
+`options` child:
+
+```kdl
+plugin "wfxr/tmux-fzf" {
+    bind "C-w" {
+        options "-n" "-r" "-T" "root"
+        shell "scripts/session.sh attach | tee \"$TMUX_FZF_LOG\"" background=#true
+    }
+}
+```
+
+Every `options` string is passed unchanged as one `bind-key` argv token before
+the key. tmup doesn't split option strings or validate them against the
+installed tmux version, so use separate strings for separate tokens, such as
+`options "-T" "root"`. Combined options such as `"-nr"` also work when tmux
+supports them. Tmux reports unsupported options.
+
+The `shell` command runs through `/bin/sh` from the resolved plugin directory.
+Remote plugins use their canonical managed installation directory, while local
+plugins use the expanded declared path. Shell operators, pipelines,
+redirections, quotes, and variables are preserved. Variables aren't expanded
+during `tmup init`; tmux evaluates them from its current global environment
+when you press the key. `background` defaults to `#false`; set it to `#true` to
+pass `-b` to the nested `run-shell` action.
+
+Tmup registers all explicit bindings only after every eligible plugin's sorted
+`*.tmux` scripts have loaded. Plugin order and `bind` node order determine
+registration order, and tmup performs no duplicate key or key-table checks, so
+normal tmux last-write-wins behavior applies. The working-directory wrapper
+uses portable `/bin/sh` syntax and doesn't require native `run-shell -c` or
+tmux version detection.
+
+Bindings are replayed only by `tmup init`; `sync` and `update` don't change the
+running tmux server. Removing or changing a declaration doesn't unbind or
+restore a prior binding until you perform explicit cleanup or restart the tmux
+server. Binding keys, options, shell text, and background mode don't affect
+lock fingerprints.
 
 ### Conditional plugins
 
@@ -458,7 +503,8 @@ Designed for `run-shell "tmup init"` in `.tmux.conf`.
    directories.
 5. **Load tmux state** — initialize `TMUX_PLUGIN_MANAGER_PATH`, apply every
    eligible plugin's ordered environment operations and options in declaration
-   order, then source all eligible plugins' sorted `*.tmux` files.
+   order, source all eligible plugins' sorted `*.tmux` files, then register all
+   explicit bindings in plugin and node declaration order.
 
 `init` never advances floating selectors beyond what config declares. Known
 build failures are still recorded and surfaced, but because startup begins with

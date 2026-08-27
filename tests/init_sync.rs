@@ -47,7 +47,7 @@ fn write_recording_tmux(root: &Path, log: &Path) -> PathBuf {
         format!(
             r#"#!/bin/sh
 case "$1" in
-  set-environment|set|run-shell)
+  set-environment|set|run-shell|bind-key)
     printf 'command\n' >> '{log}'
     for arg do
       printf 'arg=<%s>\n' "$arg" >> '{log}'
@@ -152,6 +152,7 @@ fn make_plugin(clone_url: &str, tracking: Tracking, build: Option<&str>) -> Plug
         build: build.map(String::from),
         opts: vec![],
         environment: vec![],
+        bindings: vec![],
     }
 }
 
@@ -366,7 +367,7 @@ fn public_init_applies_literal_environment_operations_before_all_plugin_scripts(
     let dir = tempdir().unwrap();
     make_remote_repo(dir.path());
     let gitconfig = write_git_rewrite_config(dir.path());
-    let local_plugin = dir.path().join("local-plugin");
+    let local_plugin = dir.path().join("local plugin's repo");
     let skipped_plugin = dir.path().join("skipped-plugin");
     for plugin in [&local_plugin, &skipped_plugin] {
         std::fs::create_dir_all(plugin).unwrap();
@@ -384,22 +385,30 @@ plugin "https://example.com/test/plugin.git" opt-prefix="remote_" {{
     unset-env "STALE"
     env "TMUX_PLUGIN_MANAGER_PATH" "plugin-owned"
     opt "mode" "one"
+    bind "C-w" {{
+        options "-n" "-r" "-T" "root"
+        shell "scripts/session.sh attach | tee \"$TMUX_FZF_LOG\""
+    }}
 }}
-plugin "{local_plugin}" local=#true opt-prefix="local_" {{
+plugin "$LOCAL_PLUGIN" local=#true opt-prefix="local_" {{
     env "SHARED" "local"
     unset-env "SHARED"
     env "SHARED" ""
     unset-env "TMUX_PLUGIN_MANAGER_PATH"
     opt "mode" "two"
+    bind "C-w" {{
+        shell "./launch > \"$OUTPUT\"" background=#true
+    }}
 }}
 plugin "{skipped_plugin}" local=#true cond=#false {{
     env "SKIPPED" "no"
+    bind "skipped" {{ shell "false" }}
 }}
 plugin "user/disabled" enabled=#false {{
     env "DISABLED" "no"
+    bind "disabled" {{ shell "false" }}
 }}
 "#,
-            local_plugin = local_plugin.display(),
             skipped_plugin = skipped_plugin.display(),
         ),
     )
@@ -412,12 +421,14 @@ plugin "user/disabled" enabled=#false {{
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", &gitconfig)
         .env("HOME", dir.path().join("runtime-home"))
+        .env("LOCAL_PLUGIN", &local_plugin)
         .env("PLUGIN_DIR", "runtime-plugin-dir")
         .output()
         .unwrap();
 
     assert!(output.status.success(), "stderr:\n{}", String::from_utf8_lossy(&output.stderr));
     let plugin_root = dir.path().join("data/tmup/plugins");
+    let local_plugin_shell = local_plugin.display().to_string().replace('\'', "'\"'\"'");
     assert_eq!(
         std::fs::read_to_string(&tmux_log).unwrap(),
         format!(
@@ -490,12 +501,63 @@ arg=<'{plugin_root}/example.com/test/plugin/init.tmux'>\n\
 end\n\
 command\n\
 arg=<run-shell>\n\
-arg=<'{local_plugin}/init.tmux'>\n\
+arg=<'{local_plugin_shell}/init.tmux'>\n\
+end\n\
+command\n\
+arg=<bind-key>\n\
+arg=<-n>\n\
+arg=<-r>\n\
+arg=<-T>\n\
+arg=<root>\n\
+arg=<C-w>\n\
+arg=<run-shell>\n\
+arg=<cd '{plugin_root}/example.com/test/plugin' && exec /bin/sh -c 'scripts/session.sh attach | tee \"$TMUX_FZF_LOG\"'>\n\
+end\n\
+command\n\
+arg=<bind-key>\n\
+arg=<C-w>\n\
+arg=<run-shell>\n\
+arg=<-b>\n\
+arg=<cd '{local_plugin_shell}' && exec /bin/sh -c './launch > \"$OUTPUT\"'>\n\
 end\n",
             plugin_root = plugin_root.display(),
-            local_plugin = local_plugin.display(),
+            local_plugin_shell = local_plugin_shell,
         )
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn public_init_rejects_malformed_bindings_before_tmux_loading_or_state_mutation() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("tmup.kdl");
+    std::fs::write(
+        &config_path,
+        r#"
+options { auto-install #true }
+plugin "user/repo" {
+    bind "x" {
+        shell "true" background="yes"
+    }
+}
+"#,
+    )
+    .unwrap();
+    let tmux_log = dir.path().join("tmux.log");
+    let fake_tmux_dir = write_recording_tmux(dir.path(), &tmux_log);
+    let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
+
+    let output = public_init_command(&config_path, dir.path(), &path).output().unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("shell background must be a bool"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!tmux_log.exists(), "invalid bindings must fail before tmux loading");
+    assert!(!dir.path().join("data/tmup/plugins").exists());
+    assert!(!dir.path().join("state/tmup").exists());
 }
 
 #[cfg(unix)]

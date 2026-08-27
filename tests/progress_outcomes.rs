@@ -24,6 +24,7 @@ fn make_plugin(id: &str, clone_url: &str, tracking: Tracking, build: Option<&str
         build: build.map(String::from),
         opts: vec![],
         environment: vec![],
+        bindings: vec![],
     }
 }
 

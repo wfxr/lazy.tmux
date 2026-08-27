@@ -4,7 +4,9 @@ use std::path::Path;
 use anyhow::{Context, Result, bail, ensure};
 use kdl::{KdlDocument, KdlEntry};
 
-use crate::model::{Config, EnvironmentOperation, Options, PluginSource, PluginSpec, Tracking};
+use crate::model::{
+    Config, EnvironmentOperation, KeyBinding, Options, PluginSource, PluginSpec, Tracking,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Condition {
@@ -121,6 +123,7 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
     // Parse child nodes: opt entries, environment operations, and build (as child node)
     let mut opts = Vec::new();
     let mut environment = Vec::new();
+    let mut bindings = Vec::new();
     let mut child_build: Option<String> = None;
     if let Some(children) = node.children() {
         for child in children.nodes() {
@@ -141,6 +144,7 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
                 "env" | "unset-env" => {
                     environment.push(parse_environment_operation(child, &raw)?);
                 }
+                "bind" => bindings.push(parse_key_binding(child, &raw)?),
                 "build" => {
                     ensure!(
                         child_build.is_none(),
@@ -201,15 +205,140 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
             build,
             opts,
             environment,
+            bindings,
         }
     } else {
         let mut spec =
             PluginSpec::from_remote(raw, explicit_name, opt_prefix, tracking, build, opts)?;
         spec.environment = environment;
+        spec.bindings = bindings;
         spec
     };
 
     Ok(PluginDeclaration { spec: source, enabled, load_condition })
+}
+
+fn parse_key_binding(node: &kdl::KdlNode, plugin: &str) -> Result<KeyBinding> {
+    ensure!(
+        node.entries().iter().all(|entry| entry.name().is_none()),
+        "plugin \"{plugin}\": bind must not have properties"
+    );
+    ensure!(
+        node.entries().len() == 1,
+        "plugin \"{plugin}\": bind requires exactly 1 key string argument"
+    );
+    ensure!(
+        node.entries()[0].ty().is_none(),
+        "plugin \"{plugin}\": bind does not support KDL type annotations"
+    );
+    let key = node.entries()[0]
+        .value()
+        .as_string()
+        .with_context(|| format!("plugin \"{plugin}\": bind key must be a string"))?
+        .to_string();
+    ensure!(!key.is_empty(), "plugin \"{plugin}\": bind key must not be empty");
+    let children = node
+        .children()
+        .with_context(|| format!("plugin \"{plugin}\": bind requires a child block"))?;
+    let mut options = None;
+    let mut shell = None;
+    for child in children.nodes() {
+        match child.name().value() {
+            "options" => {
+                ensure!(
+                    options.is_none(),
+                    "plugin \"{plugin}\": bind options child may only be specified once"
+                );
+                options = Some(parse_bind_options(child, plugin)?);
+            }
+            "shell" => {
+                ensure!(
+                    shell.is_none(),
+                    "plugin \"{plugin}\": bind requires exactly one shell child"
+                );
+                shell = Some(parse_bind_shell(child, plugin)?);
+            }
+            unknown => bail!("plugin \"{plugin}\": unknown bind child \"{unknown}\""),
+        }
+    }
+    let (shell, background) = shell
+        .with_context(|| format!("plugin \"{plugin}\": bind requires exactly one shell child"))?;
+
+    Ok(KeyBinding { key, options: options.unwrap_or_default(), shell, background })
+}
+
+fn parse_bind_options(node: &kdl::KdlNode, plugin: &str) -> Result<Vec<String>> {
+    ensure!(
+        node.children().is_none(),
+        "plugin \"{plugin}\": bind options must not have child nodes"
+    );
+    ensure!(
+        node.entries().iter().all(|entry| entry.name().is_none()),
+        "plugin \"{plugin}\": bind options must not have properties"
+    );
+    ensure!(
+        !node.entries().is_empty(),
+        "plugin \"{plugin}\": bind options requires at least 1 non-empty string"
+    );
+    ensure!(
+        node.entries().iter().all(|entry| entry.ty().is_none()),
+        "plugin \"{plugin}\": bind options does not support KDL type annotations"
+    );
+    node.entries()
+        .iter()
+        .map(|entry| {
+            let option = entry
+                .value()
+                .as_string()
+                .with_context(|| format!("plugin \"{plugin}\": bind options must be strings"))?;
+            ensure!(
+                !option.is_empty(),
+                "plugin \"{plugin}\": bind option strings must not be empty"
+            );
+            Ok(option.to_string())
+        })
+        .collect()
+}
+
+fn parse_bind_shell(node: &kdl::KdlNode, plugin: &str) -> Result<(String, bool)> {
+    ensure!(node.children().is_none(), "plugin \"{plugin}\": bind shell must not have child nodes");
+    let positional: Vec<_> = node.entries().iter().filter(|entry| entry.name().is_none()).collect();
+    ensure!(positional.len() == 1, "plugin \"{plugin}\": shell requires exactly 1 command string");
+    ensure!(
+        positional[0].ty().is_none(),
+        "plugin \"{plugin}\": bind shell does not support KDL type annotations"
+    );
+    let shell = positional[0]
+        .value()
+        .as_string()
+        .with_context(|| format!("plugin \"{plugin}\": shell command must be a string"))?
+        .to_string();
+    ensure!(
+        !shell.trim().is_empty(),
+        "plugin \"{plugin}\": shell command must not be empty or whitespace-only"
+    );
+
+    let mut background = false;
+    let mut background_seen = false;
+    for entry in node.entries().iter().filter(|entry| entry.name().is_some()) {
+        let name = entry.name().expect("filtered to named entries").value();
+        ensure!(name == "background", "plugin \"{plugin}\": unknown shell property \"{name}\"");
+        ensure!(
+            !background_seen,
+            "plugin \"{plugin}\": shell background may only be specified once"
+        );
+        ensure!(
+            entry.ty().is_none(),
+            "plugin \"{plugin}\": shell background does not support KDL type annotations"
+        );
+        background = entry
+            .value()
+            .as_bool()
+            .with_context(|| format!("plugin \"{plugin}\": shell background must be a bool"))?;
+        background_seen = true;
+    }
+
+    Ok((shell, background))
 }
 
 fn parse_environment_operation(node: &kdl::KdlNode, plugin: &str) -> Result<EnvironmentOperation> {

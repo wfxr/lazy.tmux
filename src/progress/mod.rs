@@ -40,6 +40,7 @@ pub(crate) mod test_support {
             build: None,
             opts: Vec::new(),
             environment: Vec::new(),
+            bindings: Vec::new(),
         }
     }
 }

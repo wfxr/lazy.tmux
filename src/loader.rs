@@ -1,10 +1,10 @@
 use std::path::Path;
 
 use crate::config_mode::LoadEligibility;
-use crate::model::{EnvironmentOperation, PluginSource};
+use crate::model::{EnvironmentOperation, PluginSource, PluginSpec};
 use crate::tmux::TmuxCommand;
 
-/// Build the full load plan: set the manager path, configure plugins, then run `*.tmux` files.
+/// Build the full load plan: set the manager path, configure plugins, run `*.tmux` files, then bind keys.
 pub fn build_load_plan(
     load_eligibility: LoadEligibility<'_>,
     plugin_root: &Path,
@@ -51,10 +51,7 @@ pub fn build_load_plan(
         if !load_eligible {
             continue;
         }
-        let plugin_dir = match &spec.source {
-            PluginSource::Remote { id, .. } => plugin_root.join(id),
-            PluginSource::Local { path } => std::path::PathBuf::from(path),
-        };
+        let plugin_dir = resolved_plugin_dir(spec, plugin_root);
 
         // Find and sort *.tmux files
         let tmux_scripts = find_tmux_scripts(&plugin_dir);
@@ -63,7 +60,31 @@ pub fn build_load_plan(
         }
     }
 
+    // 4. Register explicit bindings after all plugin scripts so declarations can override defaults.
+    for (spec, load_eligible) in load_eligibility.plugins() {
+        if !load_eligible {
+            continue;
+        }
+        let plugin_dir = resolved_plugin_dir(spec, plugin_root);
+        for binding in &spec.bindings {
+            plan.push(TmuxCommand::BindKey {
+                options: binding.options.clone(),
+                key: binding.key.clone(),
+                plugin_dir: plugin_dir.clone(),
+                shell: binding.shell.clone(),
+                background: binding.background,
+            });
+        }
+    }
+
     plan
+}
+
+fn resolved_plugin_dir(spec: &PluginSpec, plugin_root: &Path) -> std::path::PathBuf {
+    match &spec.source {
+        PluginSource::Remote { id, .. } => plugin_root.join(id),
+        PluginSource::Local { path } => std::path::PathBuf::from(path),
+    }
 }
 
 /// Find all *.tmux files in a directory, sorted by filename.

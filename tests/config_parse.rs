@@ -1,5 +1,5 @@
 use tmup::config::parse_config;
-use tmup::model::EnvironmentOperation;
+use tmup::model::{EnvironmentOperation, KeyBinding};
 
 #[test]
 fn parses_remote_and_local_plugins() {
@@ -80,6 +80,148 @@ plugin "/opt/plugins/local" local=#true {
         cfg.plugins[1].environment,
         vec![EnvironmentOperation::Unset { name: "MODE".into() }]
     );
+}
+
+#[test]
+fn parses_ordered_shell_bindings_for_remote_and_local_plugins() {
+    let cfg = parse_config(
+        r##"
+plugin "user/remote" {
+    bind "C-w" {
+        options "-n" "-r"
+        shell "scripts/session.sh attach | tee /tmp/session.log" background=#true
+    }
+    bind "x" {
+        shell "printf '%s\n' \"$CURRENT_MODE\""
+    }
+}
+
+plugin "/opt/plugins/local" local=#true {
+    bind "M-l" {
+        shell "./launch"
+    }
+}
+"##,
+    )
+    .unwrap();
+
+    assert_eq!(
+        cfg.plugins[0].bindings,
+        vec![
+            KeyBinding {
+                key: "C-w".into(),
+                options: vec!["-n".into(), "-r".into()],
+                shell: "scripts/session.sh attach | tee /tmp/session.log".into(),
+                background: true,
+            },
+            KeyBinding {
+                key: "x".into(),
+                options: vec![],
+                shell: "printf '%s\n' \"$CURRENT_MODE\"".into(),
+                background: false,
+            },
+        ]
+    );
+    assert_eq!(
+        cfg.plugins[1].bindings,
+        vec![KeyBinding {
+            key: "M-l".into(),
+            options: vec![],
+            shell: "./launch".into(),
+            background: false,
+        }]
+    );
+}
+
+#[test]
+fn rejects_malformed_recognized_binding_nodes() {
+    let cases = [
+        (r#"plugin "user/repo" { bind { shell "true" } }"#, "exactly 1 key string argument"),
+        (
+            r#"plugin "user/repo" { bind "x" "extra" { shell "true" } }"#,
+            "exactly 1 key string argument",
+        ),
+        (r#"plugin "user/repo" { bind 42 { shell "true" } }"#, "key must be a string"),
+        (r#"plugin "user/repo" { bind "" { shell "true" } }"#, "key must not be empty"),
+        (
+            r#"plugin "user/repo" { bind "x" future=#true { shell "true" } }"#,
+            "bind must not have properties",
+        ),
+        (
+            r#"plugin "user/repo" { bind (future)"x" { shell "true" } }"#,
+            "bind does not support KDL type annotations",
+        ),
+        (r#"plugin "user/repo" { bind "x" }"#, "bind requires a child block"),
+        (r#"plugin "user/repo" { bind "x" { options; shell "true" } }"#, "at least 1"),
+        (
+            r#"plugin "user/repo" { bind "x" { options ""; shell "true" } }"#,
+            "option strings must not be empty",
+        ),
+        (
+            r#"plugin "user/repo" { bind "x" { options "-n" 42; shell "true" } }"#,
+            "options must be strings",
+        ),
+        (
+            r#"plugin "user/repo" { bind "x" { options "-n"; options "-r"; shell "true" } }"#,
+            "options child may only be specified once",
+        ),
+        (
+            r#"plugin "user/repo" { bind "x" { options "-n" future=#true; shell "true" } }"#,
+            "options must not have properties",
+        ),
+        (
+            r#"plugin "user/repo" { bind "x" { options (future)"-n"; shell "true" } }"#,
+            "options does not support KDL type annotations",
+        ),
+        (
+            "plugin \"user/repo\" { bind \"x\" { options \"-n\" { future #true }; shell \"true\" } }",
+            "options must not have child nodes",
+        ),
+        (r#"plugin "user/repo" { bind "x" { options "-n" } }"#, "exactly one shell child"),
+        (
+            r#"plugin "user/repo" { bind "x" { shell "true"; shell "false" } }"#,
+            "exactly one shell child",
+        ),
+        (
+            r#"plugin "user/repo" { bind "x" { shell "true" "extra" } }"#,
+            "shell requires exactly 1 command string",
+        ),
+        (r#"plugin "user/repo" { bind "x" { shell 42 } }"#, "shell command must be a string"),
+        (r#"plugin "user/repo" { bind "x" { shell "   " } }"#, "empty or whitespace-only"),
+        (
+            r#"plugin "user/repo" { bind "x" { shell "true" future=#true } }"#,
+            "unknown shell property",
+        ),
+        (
+            r#"plugin "user/repo" { bind "x" { shell "true" background="yes" } }"#,
+            "background must be a bool",
+        ),
+        (
+            r#"plugin "user/repo" { bind "x" { shell "true" background=#true background=#false } }"#,
+            "background may only be specified once",
+        ),
+        (
+            r#"plugin "user/repo" { bind "x" { shell "true" background=(future)#true } }"#,
+            "background does not support KDL type annotations",
+        ),
+        (
+            r#"plugin "user/repo" { bind "x" { shell (future)"true" } }"#,
+            "shell does not support KDL type annotations",
+        ),
+        (
+            "plugin \"user/repo\" { bind \"x\" { shell \"true\" { future #true } } }",
+            "shell must not have child nodes",
+        ),
+        (
+            r#"plugin "user/repo" { bind "x" { future "value"; shell "true" } }"#,
+            "unknown bind child",
+        ),
+    ];
+
+    for (input, expected) in cases {
+        let error = parse_config(input).unwrap_err();
+        assert!(error.to_string().contains(expected), "input={input:?}, error={error:#}");
+    }
 }
 
 #[test]

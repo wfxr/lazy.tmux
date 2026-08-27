@@ -34,6 +34,7 @@ fn make_config_with_tracking(clone_url: &str, tracking: Tracking, build: Option<
             build: build.map(String::from),
             opts: vec![],
             environment: vec![],
+            bindings: vec![],
         }],
     }
 }

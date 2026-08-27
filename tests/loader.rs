@@ -113,17 +113,27 @@ fn loader_applies_plugin_setup_before_loading_any_scripts() {
     }
     let config = resolve_config(
         dir.path(),
-        r#"
+        r##"
 plugin "user/plugin-a" opt-prefix="a_" {
     env "SHARED" "first"
     unset-env "LEGACY"
     opt "mode" "one"
+    bind "x" {
+        options "-n" "-r"
+        shell "./first"
+    }
+    bind "x" {
+        shell "./override"
+    }
 }
 plugin "user/plugin-b" opt-prefix="b_" {
     env "SHARED" "second"
     opt "mode" "two"
+    bind "M-b" {
+        shell "./background" background=#true
+    }
 }
-"#,
+"##,
     );
 
     let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
@@ -145,6 +155,27 @@ plugin "user/plugin-b" opt-prefix="b_" {
             },
             TmuxCommand::RunShell {
                 script: plugin_root.join("github.com/user/plugin-b/plugin-b.tmux")
+            },
+            TmuxCommand::BindKey {
+                options: vec!["-n".into(), "-r".into()],
+                key: "x".into(),
+                plugin_dir: plugin_root.join("github.com/user/plugin-a"),
+                shell: "./first".into(),
+                background: false,
+            },
+            TmuxCommand::BindKey {
+                options: vec![],
+                key: "x".into(),
+                plugin_dir: plugin_root.join("github.com/user/plugin-a"),
+                shell: "./override".into(),
+                background: false,
+            },
+            TmuxCommand::BindKey {
+                options: vec![],
+                key: "M-b".into(),
+                plugin_dir: plugin_root.join("github.com/user/plugin-b"),
+                shell: "./background".into(),
+                background: true,
             },
         ]
     );
@@ -218,6 +249,7 @@ plugin "user/skip" cond=#false opt-prefix="skip_" {
     env "SKIP_ENV" "no"
     unset-env "SKIP_UNSET"
     opt "mode" "no"
+    bind "skip" { shell "./skip" }
 }
 plugin "user/load-last" opt-prefix="last_" { opt "mode" "yes" }
 "#,
@@ -231,6 +263,7 @@ plugin "user/load-last" opt-prefix="last_" { opt "mode" "yes" }
         TmuxCommand::RunShell { script } => script.ends_with("skip.tmux"),
         TmuxCommand::SetEnvironment { key, .. } => key == "SKIP_ENV",
         TmuxCommand::UnsetEnvironment { key } => key == "SKIP_UNSET",
+        TmuxCommand::BindKey { key, .. } => key == "skip",
     }));
     let scripts: Vec<_> = plan
         .iter()

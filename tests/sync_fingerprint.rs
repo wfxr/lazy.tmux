@@ -47,14 +47,18 @@ plugin "https://github.com/user/beta.git"
 }
 
 #[test]
-fn environment_declarations_do_not_affect_plugin_or_config_fingerprints() {
+fn runtime_declarations_do_not_affect_plugin_or_config_fingerprints() {
     let first = parse_config(
-        r#"
+        r##"
 plugin "user/repo" {
     env "MODE" "one"
     unset-env "LEGACY"
+    bind "C-w" {
+        options "-n" "-r"
+        shell "./first" background=#true
+    }
 }
-"#,
+"##,
     )
     .unwrap();
     let second = parse_config(
@@ -62,6 +66,10 @@ plugin "user/repo" {
 plugin "user/repo" {
     unset-env "MODE"
     env "MODE" "two"
+    bind "M-x" {
+        options "-T" "root"
+        shell "printf '%s\n' \"$MODE\""
+    }
 }
 "#,
     )

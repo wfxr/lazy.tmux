@@ -30,6 +30,19 @@ pub enum TmuxCommand {
         /// Path to the shell script.
         script: PathBuf,
     },
+    /// Register a key that runs a shell command from a plugin directory.
+    BindKey {
+        /// Ordered `bind-key` option tokens.
+        options: Vec<String>,
+        /// Key passed to `bind-key`.
+        key: String,
+        /// Plugin installation directory used as the command working directory.
+        plugin_dir: PathBuf,
+        /// User shell text evaluated when the key is pressed.
+        shell: String,
+        /// Whether the nested `run-shell` action runs in the background.
+        background: bool,
+    },
 }
 
 impl TmuxCommand {
@@ -47,6 +60,22 @@ impl TmuxCommand {
             }
             Self::RunShell { script } => {
                 vec!["run-shell".into(), shell_quote(&script.to_string_lossy())]
+            }
+            Self::BindKey { options, key, plugin_dir, shell, background } => {
+                let mut args = Vec::with_capacity(options.len() + 5);
+                args.push("bind-key".into());
+                args.extend(options.iter().cloned());
+                args.push(key.clone());
+                args.push("run-shell".into());
+                if *background {
+                    args.push("-b".into());
+                }
+                args.push(format!(
+                    "cd {} && exec /bin/sh -c {}",
+                    shell_quote(&plugin_dir.to_string_lossy()),
+                    shell_quote(shell)
+                ));
+                args
             }
         }
     }

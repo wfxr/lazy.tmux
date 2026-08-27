@@ -30,6 +30,7 @@ fn make_plugin(
         build: build.map(String::from),
         opts: vec![],
         environment: vec![],
+        bindings: vec![],
     }
 }
 

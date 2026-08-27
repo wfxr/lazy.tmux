@@ -75,6 +75,19 @@ pub enum EnvironmentOperation {
     },
 }
 
+/// A plugin-scoped key binding that runs a shell command from the plugin directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyBinding {
+    /// Key passed to `tmux bind-key`.
+    pub key: String,
+    /// Ordered `bind-key` option tokens placed before the key.
+    pub options: Vec<String>,
+    /// Shell command evaluated when the key is pressed.
+    pub shell: String,
+    /// Whether `tmux run-shell` runs the command in the background.
+    pub background: bool,
+}
+
 /// Full specification for a single plugin entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginSpec {
@@ -92,6 +105,8 @@ pub struct PluginSpec {
     pub opts: Vec<(String, String)>,
     /// Ordered global tmux environment operations applied while loading the plugin.
     pub environment: Vec<EnvironmentOperation>,
+    /// Ordered key bindings registered after plugin scripts load.
+    pub bindings: Vec<KeyBinding>,
 }
 
 impl Config {
@@ -128,6 +143,7 @@ impl PluginSpec {
             build,
             opts,
             environment: Vec::new(),
+            bindings: Vec::new(),
         })
     }
 
