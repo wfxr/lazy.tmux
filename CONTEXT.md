@@ -21,9 +21,13 @@ The ordered plugin declarations whose Enable Conditions are true on an Execution
 _Avoid_: Active plugins, raw configuration
 
 **Load Condition**:
-The `cond` predicate that determines whether an enabled plugin's options and scripts are loaded during an Init Session without changing its managed state.
+The `cond` predicate that determines whether an Init Session applies an enabled plugin's runtime environment operations and options, loads its scripts, and registers its bindings without changing managed state.
 _Avoid_: Enable condition
 
 **Load Eligibility**:
 Whether an enabled plugin's Load Condition currently permits a future Init Session to load it. It does not describe or undo effects from an earlier load.
 _Avoid_: Active state, loaded state
+
+**Runtime Configuration Branch**:
+A mutually exclusive choice between plugin-scoped runtime declarations selected once for an Init Session on its Execution Host. It does not change plugin inclusion, Load Eligibility, or lock-backed managed state.
+_Avoid_: Conditional Load Condition, client-specific configuration
