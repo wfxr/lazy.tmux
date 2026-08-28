@@ -231,6 +231,18 @@ does not exist yet. Read-only commands such as `list` do not create it. When
 
 `tmup.lock` lives next to the active `tmup.kdl`.
 
+Native `tmup.kdl` uses a closed grammar. The document root accepts at most one
+`options` node and any number of `plugin` nodes, in any order. Unknown nodes,
+properties, extra arguments, duplicate scalar declarations, unsupported child
+blocks, and KDL type annotations are configuration errors. Every command
+validates the complete document before evaluating predicates or changing
+managed or runtime state.
+
+This strict grammar applies only to `tmup.kdl`. The TPM-compatible scanner
+continues to extract plugin declarations it recognizes from `.tmux.conf` and
+ignores unrelated tmux syntax. Operational warnings, such as a KDL declaration
+replacing its matching TPM declaration or stale lock metadata, remain visible.
+
 tmup supports two internal config loading modes:
 
 - `pure` — load only `tmup.kdl`
@@ -305,11 +317,15 @@ plugin "company/remote-tools" cond=#"[ -n "$SSH_CLIENT" ]"#
 
 ### Options reference
 
+The `options` node requires a child block and doesn't accept arguments or
+properties. Each documented option may appear at most once and requires
+exactly one argument of its documented type. Option nodes don't accept
+properties or child blocks. Missing options keep their defaults.
+
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `auto-install` | bool | `#true` | Install missing plugins during `init` |
 | `concurrency` | integer | `16` | Max concurrent remote prepare jobs; `1` forces serial prepare |
-
 
 ### Plugin properties
 
@@ -354,9 +370,14 @@ remote and local plugins with Load Eligibility during `tmup init`.
 | `env` | non-empty name string, value string | Set a value in the tmux global environment; the value may be empty |
 | `unset-env` | non-empty name string | Remove a value from the tmux global environment |
 | `bind` | non-empty key string, child block | Register one plugin-scoped shell binding after all plugin scripts load |
-| `build` | command string | Alternative child form of the `build` property |
 | `if` | bool or non-empty shell predicate, child block | Select runtime declarations during `init` |
 | `else` | child block | Optional fallback immediately following an `if` node |
+
+`build` is available only as a plugin property. Plugin sources, explicit names,
+tracking selectors, build commands, option keys, environment names, binding
+keys, binding shell commands, and binding option strings must contain a
+non-whitespace character. Option values, environment values, and `opt-prefix`
+may be empty.
 
 `env` values are literal. tmup doesn't expand shell syntax, `~`, process
 environment variables, or plugin-directory placeholders in them. Environment
@@ -468,21 +489,23 @@ TPM-only declarations are unconditional. A matching KDL declaration with
 `enabled=#false` suppresses the plugin instead of falling back to the TPM
 declaration.
 
-Unknown plugin parameters produce warnings and are otherwise ignored. Invalid
-values for `enabled` or `cond`, empty predicate strings, duplicate known scalar
-properties, and reserved condition child or type-annotation syntax are errors.
+Unknown plugin parameters, invalid values for `enabled` or `cond`, empty
+predicate strings, duplicate known scalar properties, and reserved condition
+child syntax are errors. KDL type annotations are unsupported throughout native
+configuration.
 Older tmup versions may ignore condition properties and load affected plugins
 unconditionally, so conditional configs require a version that documents these
 properties.
 
 ### Runtime Configuration Branches
 
-Runtime Configuration Branches, available since tmup 0.2.0, select different
-runtime declarations for an enabled, load-eligible plugin without changing its
-managed or locked state. Remote and local plugins can mix unconditional
-declarations with multiple independent `if` nodes, and branches can contain
-nested `if` nodes. Each `if` accepts one KDL bool or non-empty shell predicate
-and an optional, immediately following `else` node.
+Runtime Configuration Branches are planned for their first stable release in
+tmup 0.2.0. They select different runtime declarations for an enabled,
+load-eligible plugin without changing its managed or locked state. Remote and
+local plugins can mix unconditional declarations with multiple independent
+`if` nodes, and branches can contain nested `if` nodes. Each `if` accepts one
+KDL bool or non-empty shell predicate and an optional, immediately following
+`else` node.
 
 A branch is a closed language: it may contain only `opt`, `env`, `unset-env`,
 `bind`, and nested `if` nodes. Empty branches are valid. Every command validates

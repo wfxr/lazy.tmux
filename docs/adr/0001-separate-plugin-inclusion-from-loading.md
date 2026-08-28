@@ -6,6 +6,8 @@ status: accepted
 
 tmup needs one configuration to adapt to different Execution Hosts without making tmux server-global plugin effects client-specific. We separate whether a plugin belongs to an Effective Plugin Specification from whether an Init Session may load it, preserving a clear lock-backed lifecycle while allowing host-specific activation.
 
+> **Decision update:** [ADR 0003](0003-reject-unsupported-native-configuration-syntax.md) supersedes this decision's forward-compatibility warning for unknown native plugin parameters. Unsupported native KDL is now a hard configuration error.
+
 ## Decision
 
 Plugin declarations have two independent, optional conditions. Both default to true, apply to remote and local plugins as a whole, and accept either a boolean or a non-empty `/bin/sh` predicate string.

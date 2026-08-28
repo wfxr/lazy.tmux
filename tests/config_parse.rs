@@ -210,25 +210,25 @@ fn rejects_wrong_type_build() {
 }
 
 #[test]
-fn rejects_dual_build_specification() {
+fn rejects_build_child_when_build_property_exists() {
     let input = r#"
 plugin "tmux-plugins/tmux-resurrect" build="make install" {
     build "cargo build --release"
 }
     "#;
     let err = parse_config(input).unwrap_err();
-    assert!(err.to_string().contains("both as property and child node"), "{err}");
+    assert!(err.to_string().contains("unknown child \"build\""), "{err}");
 }
 
 #[test]
-fn parses_build_as_child_node() {
+fn rejects_build_as_child_node() {
     let input = r#"
 plugin "tmux-plugins/tmux-resurrect" {
     build "make install"
-}
+    }
     "#;
-    let cfg = parse_config(input).unwrap();
-    assert_eq!(cfg.plugins[0].build.as_deref(), Some("make install"));
+    let err = parse_config(input).unwrap_err();
+    assert!(err.to_string().contains("unknown child \"build\""), "{err}");
 }
 
 #[test]

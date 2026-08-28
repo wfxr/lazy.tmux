@@ -295,14 +295,18 @@ plugin "{}" local=#true enabled=#false
 }
 
 #[test]
-fn list_emits_unknown_plugin_parameter_warnings_without_failing() {
+fn list_rejects_unknown_native_syntax_before_conditions_or_state_mutation() {
     let dir = tempdir().unwrap();
     let config_dir = dir.path().join("config/tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
+    let marker = config_dir.join("predicate-ran");
     std::fs::write(
         &config_path,
-        r#"plugin "user/repo" "future" future-property=#true { future-child #true }"#,
+        format!(
+            "plugin \"user/first\" enabled=\"touch {}\"\nplugin \"user/repo\" future-property=#true",
+            marker.display()
+        ),
     )
     .unwrap();
 
@@ -313,12 +317,14 @@ fn list_emits_unknown_plugin_parameter_warnings_without_failing() {
         .env("XDG_DATA_HOME", dir.path().join("data"))
         .env("XDG_STATE_HOME", dir.path().join("state"))
         .assert()
-        .success()
-        .stdout(predicate::str::contains("user/repo"))
-        .stderr(predicate::str::contains("warning:"))
-        .stderr(predicate::str::contains("future-property"))
-        .stderr(predicate::str::contains("future-child"))
-        .stderr(predicate::str::contains("positional"));
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("unknown property \"future-property\""))
+        .stderr(predicate::str::contains("warning:").not());
+
+    assert!(!marker.exists(), "syntax validation must precede condition evaluation");
+    assert!(!dir.path().join("data/tmup").exists(), "list must not create managed plugin state");
+    assert!(!dir.path().join("state/tmup").exists(), "list must not create runtime state");
 }
 
 #[test]

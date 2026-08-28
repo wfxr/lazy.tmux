@@ -92,6 +92,22 @@ configuration selection.
 - A false Load Condition or changed branch selection does not reconcile or undo
   effects from an earlier load.
 
+### 8) Strict Native Configuration
+
+Native `tmup.kdl` uses a closed, fail-fast grammar. See
+[ADR 0003](adr/0003-reject-unsupported-native-configuration-syntax.md) for the
+syntax boundary and compatibility trade-offs.
+
+- Every command validates the complete native configuration before evaluating
+  predicates or mutating managed or runtime state.
+- Unknown nodes, properties, extra arguments, duplicate scalar declarations,
+  unsupported child blocks, and KDL type annotations are hard errors rather
+  than compatibility warnings.
+- The TPM-compatible scanner remains permissive because `.tmux.conf` contains
+  tmux syntax outside tmup's native grammar.
+- Operational warnings for valid configuration processing remain distinct from
+  syntax errors.
+
 ## TPM Compatibility Contract (Stable Surface)
 
 - Compatibility is defined as: initialize the plugin manager path, then apply

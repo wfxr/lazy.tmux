@@ -28,6 +28,175 @@ fn config_mode_pure_loads_only_kdl() {
 }
 
 #[test]
+fn native_config_rejects_unsupported_root_and_options_syntax() {
+    let dir = tempdir().unwrap();
+    let kdl = dir.path().join("tmup.kdl");
+    let cases = [
+        (r#"future "value""#, "unknown root node \"future\""),
+        ("options {}\noptions {}", "options may only be specified once"),
+        ("options", "options requires a child block"),
+        ("options \"extra\" {}", "options must not have arguments or properties"),
+        ("options future=#true {}", "options must not have arguments or properties"),
+        ("(future)options {}", "options does not support KDL type annotations"),
+        ("options { future #true }", "unknown options child \"future\""),
+        (
+            "options { auto-install #true; auto-install #false }",
+            "options.auto-install may only be specified once",
+        ),
+        ("options { auto-install }", "options.auto-install requires exactly one bool argument"),
+        (
+            "options { auto-install #true #false }",
+            "options.auto-install requires exactly one bool argument",
+        ),
+        ("options { auto-install value=#true }", "options.auto-install must not have properties"),
+        (
+            "options { auto-install (future)#true }",
+            "options.auto-install does not support KDL type annotations",
+        ),
+        (
+            "options { (future)auto-install #true }",
+            "options.auto-install does not support KDL type annotations",
+        ),
+        (
+            "options { auto-install #true { future #true } }",
+            "options.auto-install must not have child nodes",
+        ),
+        (
+            "options { concurrency 2; concurrency 3 }",
+            "options.concurrency may only be specified once",
+        ),
+        ("options { concurrency }", "options.concurrency requires exactly one integer argument"),
+        (
+            "options { concurrency 2 3 }",
+            "options.concurrency requires exactly one integer argument",
+        ),
+        ("options { concurrency value=2 }", "options.concurrency must not have properties"),
+        (
+            "options { concurrency (future)2 }",
+            "options.concurrency does not support KDL type annotations",
+        ),
+        (
+            "options { (future)concurrency 2 }",
+            "options.concurrency does not support KDL type annotations",
+        ),
+        (
+            "options { concurrency 2 { future #true } }",
+            "options.concurrency must not have child nodes",
+        ),
+    ];
+
+    for (input, expected) in cases {
+        write_file(&kdl, input);
+        let error = load_from_sources(ConfigMode::Pure, Some(&kdl), None).unwrap_err();
+        assert!(error.to_string().contains(expected), "input={input:?}, error={error:#}");
+    }
+}
+
+#[test]
+fn native_config_rejects_unsupported_plugin_syntax() {
+    let dir = tempdir().unwrap();
+    let kdl = dir.path().join("tmup.kdl");
+    let cases = [
+        ("plugin", "plugin requires exactly one source string argument"),
+        ("plugin 42", "plugin requires exactly one source string argument"),
+        (r#"plugin "user/repo" "extra""#, "plugin requires exactly one source string argument"),
+        (r#"plugin "   ""#, "plugin source must not be empty or whitespace-only"),
+        (r#"plugin (future)"user/repo""#, "plugin source does not support KDL type annotations"),
+        (r#"(future)plugin "user/repo""#, "plugin does not support KDL type annotations"),
+        (r#"plugin "user/repo" future=#true"#, "plugin \"user/repo\": unknown property \"future\""),
+        (
+            r#"plugin "user/repo" name=(future)"repo""#,
+            "plugin \"user/repo\": name does not support KDL type annotations",
+        ),
+        (r#"plugin "user/repo" name="  ""#, "name must not be empty or whitespace-only"),
+        (r#"plugin "user/repo" branch="  ""#, "branch must not be empty or whitespace-only"),
+        (r#"plugin "user/repo" tag="  ""#, "tag must not be empty or whitespace-only"),
+        (r#"plugin "user/repo" commit="  ""#, "commit must not be empty or whitespace-only"),
+        (r#"plugin "user/repo" build="  ""#, "build must not be empty or whitespace-only"),
+        (
+            r#"plugin "user/repo" { future-child "value" }"#,
+            "plugin \"user/repo\": unknown child \"future-child\"",
+        ),
+        (
+            r#"plugin "user/repo" { build "make install" }"#,
+            "plugin \"user/repo\": unknown child \"build\"",
+        ),
+    ];
+
+    for (input, expected) in cases {
+        write_file(&kdl, input);
+        let error = load_from_sources(ConfigMode::Pure, Some(&kdl), None).unwrap_err();
+        assert!(error.to_string().contains(expected), "input={input:?}, error={error:#}");
+    }
+}
+
+#[test]
+fn native_config_rejects_unsupported_runtime_node_syntax() {
+    let dir = tempdir().unwrap();
+    let kdl = dir.path().join("tmup.kdl");
+    let cases = [
+        (
+            r#"plugin "user/repo" { opt "key" "value" "extra" }"#,
+            "opt requires exactly 2 string arguments",
+        ),
+        (
+            r#"plugin "user/repo" { opt "key" "value" future=#true }"#,
+            "opt must not have properties",
+        ),
+        (
+            r#"plugin "user/repo" { (future)opt "key" "value" }"#,
+            "opt does not support KDL type annotations",
+        ),
+        (
+            r#"plugin "user/repo" { opt "  " "value" }"#,
+            "opt key must not be empty or whitespace-only",
+        ),
+        (
+            r#"plugin "user/repo" { env "  " "value" }"#,
+            "env name must not be empty or whitespace-only",
+        ),
+        (
+            r#"plugin "user/repo" { (future)env "NAME" "value" }"#,
+            "env does not support KDL type annotations",
+        ),
+        (
+            r#"plugin "user/repo" { bind "  " { shell "true" } }"#,
+            "bind key must not be empty or whitespace-only",
+        ),
+        (
+            r#"plugin "user/repo" { (future)bind "x" { shell "true" } }"#,
+            "bind does not support KDL type annotations",
+        ),
+        (
+            r#"plugin "user/repo" { bind "x" { (future)options "-n"; shell "true" } }"#,
+            "bind options does not support KDL type annotations",
+        ),
+        (
+            r#"plugin "user/repo" { bind "x" { options "  "; shell "true" } }"#,
+            "bind option strings must not be empty or whitespace-only",
+        ),
+        (
+            r#"plugin "user/repo" { bind "x" { (future)shell "true" } }"#,
+            "bind shell does not support KDL type annotations",
+        ),
+        (
+            "plugin \"user/repo\" { if #false {}\n(future)else {} }",
+            "else does not support KDL type annotations",
+        ),
+    ];
+
+    for (input, expected) in cases {
+        write_file(&kdl, input);
+        let error = load_from_sources(ConfigMode::Pure, Some(&kdl), None).unwrap_err();
+        assert!(error.to_string().contains(expected), "input={input:?}, error={error:#}");
+    }
+
+    write_file(&kdl, r#"plugin "user/repo" { opt "key" ""; env "NAME" "" }"#);
+    load_from_sources(ConfigMode::Pure, Some(&kdl), None)
+        .expect("option and environment values may be empty");
+}
+
+#[test]
 fn config_mode_mixed_merges_tpm_plugins_into_kdl() {
     let dir = tempdir().unwrap();
     let kdl = dir.path().join("tmup.kdl");
@@ -539,28 +708,6 @@ plugin "user/repo" branch="feature" {
 }
 
 #[test]
-fn unknown_plugin_parameters_warn_without_hiding_recognized_configuration() {
-    let dir = tempdir().unwrap();
-    let kdl = dir.path().join("tmup.kdl");
-    write_file(
-        &kdl,
-        r#"
-plugin "user/repo" "future-argument" future-property="value" {
-    future-child "value"
-}
-"#,
-    );
-
-    let loaded = load_from_sources(ConfigMode::Pure, Some(&kdl), None).unwrap();
-
-    assert_eq!(loaded.config.plugins.len(), 1);
-    assert_eq!(loaded.warnings.len(), 3, "{:?}", loaded.warnings);
-    assert!(loaded.warnings.iter().any(|warning| warning.contains("positional")));
-    assert!(loaded.warnings.iter().any(|warning| warning.contains("future-property")));
-    assert!(loaded.warnings.iter().any(|warning| warning.contains("future-child")));
-}
-
-#[test]
 fn invalid_enable_condition_forms_are_rejected() {
     let dir = tempdir().unwrap();
     let kdl = dir.path().join("tmup.kdl");
@@ -623,7 +770,7 @@ fn repeated_known_plugin_values_are_rejected() {
         r#"plugin "user/repo" enabled=#true enabled=#false"#,
         r#"plugin "user/repo" cond=#true cond=#false"#,
         r#"plugin "user/repo" name="one" name="two""#,
-        r#"plugin "user/repo" { build "one"; build "two"; }"#,
+        r#"plugin "user/repo" build="one" build="two""#,
     ];
 
     for input in cases {

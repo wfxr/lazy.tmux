@@ -56,68 +56,107 @@ pub fn parse_config(input: &str) -> Result<Config> {
 pub(crate) fn parse_config_document(input: &str) -> Result<ParsedConfig> {
     let doc: KdlDocument = input.parse().context("failed to parse KDL")?;
 
-    let options = parse_options(&doc)?;
+    let mut options = None;
     let mut plugins = Vec::new();
-    let mut warnings = Vec::new();
+    let warnings = Vec::new();
 
     for node in doc.nodes() {
-        if node.name().value() == "plugin" {
-            plugins.push(parse_plugin(node, &mut warnings)?);
+        match node.name().value() {
+            "options" => {
+                ensure!(options.is_none(), "options may only be specified once");
+                options = Some(parse_options(node)?);
+            }
+            "plugin" => plugins.push(parse_plugin(node)?),
+            unknown => bail!("unknown root node \"{unknown}\""),
         }
     }
 
     validate_unique_ids(plugins.iter().map(|declaration| &declaration.spec))?;
 
-    Ok(ParsedConfig { options, plugins, warnings })
+    Ok(ParsedConfig { options: options.unwrap_or_default(), plugins, warnings })
 }
 
-fn parse_options(doc: &KdlDocument) -> Result<Options> {
+fn parse_options(node: &kdl::KdlNode) -> Result<Options> {
+    ensure!(node.ty().is_none(), "options does not support KDL type annotations");
+    ensure!(node.entries().is_empty(), "options must not have arguments or properties");
+    let children = node.children().context("options requires a child block")?;
     let mut opts = Options::default();
+    let mut auto_install_seen = false;
+    let mut concurrency_seen = false;
 
-    let Some(node) = doc.get("options") else {
-        return Ok(opts);
-    };
-    let Some(children) = node.children() else {
-        return Ok(opts);
-    };
-
-    if let Some(v) = children.get_arg("auto-install") {
-        opts.auto_install = v.as_bool().context("auto-install must be a bool")?;
-    }
-
-    if let Some(v) = children.get_arg("concurrency") {
-        let value = v.as_integer().context("concurrency must be an integer")?;
-        ensure!(value >= 1, "concurrency must be at least 1");
-        opts.concurrency =
-            usize::try_from(value).context("concurrency is too large for this platform")?;
+    for child in children.nodes() {
+        match child.name().value() {
+            "auto-install" => {
+                ensure!(!auto_install_seen, "options.auto-install may only be specified once");
+                auto_install_seen = true;
+                validate_option_child(child, "auto-install", "bool")?;
+                opts.auto_install = child.entries()[0]
+                    .value()
+                    .as_bool()
+                    .context("options.auto-install must be a bool")?;
+            }
+            "concurrency" => {
+                ensure!(!concurrency_seen, "options.concurrency may only be specified once");
+                concurrency_seen = true;
+                validate_option_child(child, "concurrency", "integer")?;
+                let value = child.entries()[0]
+                    .value()
+                    .as_integer()
+                    .context("options.concurrency must be an integer")?;
+                ensure!(value >= 1, "concurrency must be at least 1");
+                opts.concurrency =
+                    usize::try_from(value).context("concurrency is too large for this platform")?;
+            }
+            unknown => bail!("unknown options child \"{unknown}\""),
+        }
     }
 
     Ok(opts)
 }
 
-fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<PluginDeclaration> {
-    let raw = node
-        .get(0)
-        .and_then(|v| v.as_string())
-        .context("plugin requires a source string as first argument")?
-        .to_string();
+fn validate_option_child(node: &kdl::KdlNode, name: &str, value_type: &str) -> Result<()> {
+    ensure!(node.ty().is_none(), "options.{name} does not support KDL type annotations");
+    ensure!(node.children().is_none(), "options.{name} must not have child nodes");
+    ensure!(
+        node.entries().iter().all(|entry| entry.name().is_none()),
+        "options.{name} must not have properties"
+    );
+    ensure!(node.entries().len() == 1, "options.{name} requires exactly one {value_type} argument");
+    ensure!(
+        node.entries()[0].ty().is_none(),
+        "options.{name} does not support KDL type annotations"
+    );
+    Ok(())
+}
 
-    validate_plugin_properties(node, &raw, warnings)?;
+fn parse_plugin(node: &kdl::KdlNode) -> Result<PluginDeclaration> {
+    ensure!(node.ty().is_none(), "plugin does not support KDL type annotations");
+    let positional: Vec<_> = node.entries().iter().filter(|entry| entry.name().is_none()).collect();
+    ensure!(positional.len() == 1, "plugin requires exactly one source string argument");
+    ensure!(positional[0].ty().is_none(), "plugin source does not support KDL type annotations");
+    let raw = positional[0]
+        .value()
+        .as_string()
+        .context("plugin requires exactly one source string argument")?
+        .to_string();
+    ensure!(!raw.trim().is_empty(), "plugin source must not be empty or whitespace-only");
+
+    validate_plugin_properties(node, &raw)?;
 
     let enabled = parse_condition(node, &raw, "enabled")?.unwrap_or(Condition::Bool(true));
     let load_condition = parse_condition(node, &raw, "cond")?.unwrap_or(Condition::Bool(true));
 
     let is_local = get_bool(node, &raw, "local")?.unwrap_or(false);
 
-    let explicit_name = get_string(node, &raw, "name")?;
+    let explicit_name = get_non_empty_string(node, &raw, "name")?;
 
     let opt_prefix = get_string(node, &raw, "opt-prefix")?.unwrap_or_default();
 
-    let branch = get_string(node, &raw, "branch")?;
-    let tag = get_string(node, &raw, "tag")?;
-    let commit = get_string(node, &raw, "commit")?;
+    let branch = get_non_empty_string(node, &raw, "branch")?;
+    let tag = get_non_empty_string(node, &raw, "tag")?;
+    let commit = get_non_empty_string(node, &raw, "commit")?;
 
-    let build = get_string(node, &raw, "build")?;
+    let build = get_non_empty_string(node, &raw, "build")?;
 
     // Parse tracking selector
     let selector_count = [&branch, &tag, &commit].iter().filter(|v| v.is_some()).count();
@@ -136,12 +175,11 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
         Tracking::DefaultBranch
     };
 
-    // Parse child nodes: opt entries, environment operations, and build (as child node)
+    // Parse plugin runtime child nodes.
     let mut opts = Vec::new();
     let mut environment = Vec::new();
     let mut bindings = Vec::new();
     let mut runtime = Vec::new();
-    let mut child_build: Option<String> = None;
     if let Some(children) = node.children() {
         let nodes = children.nodes();
         let mut index = 0;
@@ -149,7 +187,7 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
             let child = &nodes[index];
             match child.name().value() {
                 "opt" => {
-                    let (key, value) = parse_plugin_option(child)?;
+                    let (key, value) = parse_plugin_option(child, &raw)?;
                     opts.push((key.clone(), value.clone()));
                     runtime.push(RuntimeDeclaration::Option { key, value });
                 }
@@ -172,19 +210,6 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
                     }
                 }
                 "else" => bail!("plugin \"{raw}\": else must immediately follow an if node"),
-                "build" => {
-                    ensure!(
-                        child_build.is_none(),
-                        "plugin \"{raw}\": build child node may only be specified once"
-                    );
-                    child_build = Some(
-                        child
-                            .get(0)
-                            .and_then(|v| v.as_string())
-                            .context("build child node requires a command string")?
-                            .to_string(),
-                    );
-                }
                 "enabled" => {
                     bail!(
                         "plugin \"{raw}\": enabled child form is reserved; use enabled=#true, enabled=#false, or enabled=\"shell predicate\""
@@ -195,19 +220,11 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
                         "plugin \"{raw}\": cond child form is reserved; use cond=#true, cond=#false, or cond=\"shell predicate\""
                     );
                 }
-                unknown => {
-                    warnings.push(format!("plugin \"{raw}\": ignoring unknown child \"{unknown}\""))
-                }
+                unknown => bail!("plugin \"{raw}\": unknown child \"{unknown}\""),
             }
             index += 1;
         }
     }
-
-    ensure!(
-        !(build.is_some() && child_build.is_some()),
-        "plugin \"{raw}\": build specified both as property and child node"
-    );
-    let build = build.or(child_build);
 
     let source = if is_local {
         let expanded_path = expand_local_path(&raw)?;
@@ -256,6 +273,10 @@ fn parse_runtime_branch(
     let else_node = next_node.filter(|node| node.name().value() == "else");
     let else_declarations = else_node
         .map(|node| {
+            ensure!(
+                node.ty().is_none(),
+                "plugin \"{plugin}\": else does not support KDL type annotations"
+            );
             ensure!(
                 node.entries().is_empty(),
                 "plugin \"{plugin}\": else must not have arguments or properties"
@@ -330,6 +351,11 @@ fn parse_runtime_branch_body(node: &kdl::KdlNode, plugin: &str) -> Result<Vec<Ru
 }
 
 fn parse_runtime_branch_option(node: &kdl::KdlNode, plugin: &str) -> Result<(String, String)> {
+    parse_plugin_option(node, plugin)
+}
+
+fn parse_plugin_option(node: &kdl::KdlNode, plugin: &str) -> Result<(String, String)> {
+    ensure!(node.ty().is_none(), "plugin \"{plugin}\": opt does not support KDL type annotations");
     ensure!(node.children().is_none(), "plugin \"{plugin}\": opt must not have child nodes");
     ensure!(
         node.entries().iter().all(|entry| entry.name().is_none()),
@@ -343,24 +369,25 @@ fn parse_runtime_branch_option(node: &kdl::KdlNode, plugin: &str) -> Result<(Str
         node.entries().iter().all(|entry| entry.ty().is_none()),
         "plugin \"{plugin}\": opt does not support KDL type annotations"
     );
-    parse_plugin_option(node)
-}
-
-fn parse_plugin_option(node: &kdl::KdlNode) -> Result<(String, String)> {
     let key = node
         .get(0)
         .and_then(|value| value.as_string())
-        .context("opt requires a key string")?
+        .with_context(|| format!("plugin \"{plugin}\": opt requires a key string"))?
         .to_string();
+    ensure!(
+        !key.trim().is_empty(),
+        "plugin \"{plugin}\": opt key must not be empty or whitespace-only"
+    );
     let value = node
         .get(1)
         .and_then(|value| value.as_string())
-        .context("opt requires a value string")?
+        .with_context(|| format!("plugin \"{plugin}\": opt requires a value string"))?
         .to_string();
     Ok((key, value))
 }
 
 fn parse_key_binding(node: &kdl::KdlNode, plugin: &str) -> Result<KeyBinding> {
+    ensure!(node.ty().is_none(), "plugin \"{plugin}\": bind does not support KDL type annotations");
     ensure!(
         node.entries().iter().all(|entry| entry.name().is_none()),
         "plugin \"{plugin}\": bind must not have properties"
@@ -378,7 +405,10 @@ fn parse_key_binding(node: &kdl::KdlNode, plugin: &str) -> Result<KeyBinding> {
         .as_string()
         .with_context(|| format!("plugin \"{plugin}\": bind key must be a string"))?
         .to_string();
-    ensure!(!key.is_empty(), "plugin \"{plugin}\": bind key must not be empty");
+    ensure!(
+        !key.trim().is_empty(),
+        "plugin \"{plugin}\": bind key must not be empty or whitespace-only"
+    );
     let children = node
         .children()
         .with_context(|| format!("plugin \"{plugin}\": bind requires a child block"))?;
@@ -411,6 +441,10 @@ fn parse_key_binding(node: &kdl::KdlNode, plugin: &str) -> Result<KeyBinding> {
 
 fn parse_bind_options(node: &kdl::KdlNode, plugin: &str) -> Result<Vec<String>> {
     ensure!(
+        node.ty().is_none(),
+        "plugin \"{plugin}\": bind options does not support KDL type annotations"
+    );
+    ensure!(
         node.children().is_none(),
         "plugin \"{plugin}\": bind options must not have child nodes"
     );
@@ -434,8 +468,8 @@ fn parse_bind_options(node: &kdl::KdlNode, plugin: &str) -> Result<Vec<String>> 
                 .as_string()
                 .with_context(|| format!("plugin \"{plugin}\": bind options must be strings"))?;
             ensure!(
-                !option.is_empty(),
-                "plugin \"{plugin}\": bind option strings must not be empty"
+                !option.trim().is_empty(),
+                "plugin \"{plugin}\": bind option strings must not be empty or whitespace-only"
             );
             Ok(option.to_string())
         })
@@ -443,6 +477,10 @@ fn parse_bind_options(node: &kdl::KdlNode, plugin: &str) -> Result<Vec<String>> 
 }
 
 fn parse_bind_shell(node: &kdl::KdlNode, plugin: &str) -> Result<(String, bool)> {
+    ensure!(
+        node.ty().is_none(),
+        "plugin \"{plugin}\": bind shell does not support KDL type annotations"
+    );
     ensure!(node.children().is_none(), "plugin \"{plugin}\": bind shell must not have child nodes");
     let positional: Vec<_> = node.entries().iter().filter(|entry| entry.name().is_none()).collect();
     ensure!(positional.len() == 1, "plugin \"{plugin}\": shell requires exactly 1 command string");
@@ -490,6 +528,10 @@ fn parse_environment_operation(node: &kdl::KdlNode, plugin: &str) -> Result<Envi
         "unset-env" => 1,
         _ => unreachable!("only recognized environment nodes are parsed here"),
     };
+    ensure!(
+        node.ty().is_none(),
+        "plugin \"{plugin}\": {kind} does not support KDL type annotations"
+    );
     ensure!(node.children().is_none(), "plugin \"{plugin}\": {kind} must not have child nodes");
     ensure!(
         node.entries().iter().all(|entry| entry.name().is_none()),
@@ -516,7 +558,10 @@ fn parse_environment_operation(node: &kdl::KdlNode, plugin: &str) -> Result<Envi
     let mut arguments = arguments.into_iter();
     let name =
         arguments.next().with_context(|| format!("plugin \"{plugin}\": {kind} requires a name"))?;
-    ensure!(!name.is_empty(), "plugin \"{plugin}\": {kind} name must not be empty");
+    ensure!(
+        !name.trim().is_empty(),
+        "plugin \"{plugin}\": {kind} name must not be empty or whitespace-only"
+    );
 
     match kind {
         "env" => {
@@ -544,21 +589,9 @@ pub(crate) fn validate_unique_ids<'a>(
     Ok(())
 }
 
-fn validate_plugin_properties(
-    node: &kdl::KdlNode,
-    plugin: &str,
-    warnings: &mut Vec<String>,
-) -> Result<()> {
+fn validate_plugin_properties(node: &kdl::KdlNode, plugin: &str) -> Result<()> {
     const KNOWN_PROPERTIES: &[&str] =
         &["local", "name", "opt-prefix", "branch", "tag", "commit", "build", "enabled", "cond"];
-
-    for (positional_index, _) in
-        node.entries().iter().filter(|entry| entry.name().is_none()).enumerate().skip(1)
-    {
-        warnings.push(format!(
-            "plugin \"{plugin}\": ignoring extra positional parameter at index {positional_index}"
-        ));
-    }
 
     let mut property_counts: HashMap<&str, usize> = HashMap::new();
     for name in node.entries().iter().filter_map(|entry| entry.name().map(|name| name.value())) {
@@ -567,7 +600,7 @@ fn validate_plugin_properties(
             *count += 1;
             ensure!(*count == 1, "plugin \"{plugin}\": {name} may only be specified once");
         } else {
-            warnings.push(format!("plugin \"{plugin}\": ignoring unknown property \"{name}\""));
+            bail!("plugin \"{plugin}\": unknown property \"{name}\"");
         }
     }
     Ok(())
@@ -600,23 +633,46 @@ fn property_entry<'a>(node: &'a kdl::KdlNode, key: &str) -> Option<&'a KdlEntry>
 
 /// Extract an optional string property, erroring if the property exists but is not a string.
 fn get_string(node: &kdl::KdlNode, plugin: &str, key: &str) -> Result<Option<String>> {
-    match node.get(key) {
+    match property_entry(node, key) {
         None => Ok(None),
-        Some(v) => match v.as_string() {
-            Some(s) => Ok(Some(s.to_string())),
-            None => bail!("plugin \"{plugin}\": {key} must be a string"),
-        },
+        Some(entry) => {
+            ensure!(
+                entry.ty().is_none(),
+                "plugin \"{plugin}\": {key} does not support KDL type annotations"
+            );
+            match entry.value().as_string() {
+                Some(s) => Ok(Some(s.to_string())),
+                None => bail!("plugin \"{plugin}\": {key} must be a string"),
+            }
+        }
     }
+}
+
+fn get_non_empty_string(node: &kdl::KdlNode, plugin: &str, key: &str) -> Result<Option<String>> {
+    let value = get_string(node, plugin, key)?;
+    if let Some(value) = value.as_deref() {
+        ensure!(
+            !value.trim().is_empty(),
+            "plugin \"{plugin}\": {key} must not be empty or whitespace-only"
+        );
+    }
+    Ok(value)
 }
 
 /// Extract an optional bool property, erroring if the property exists but is not a bool.
 fn get_bool(node: &kdl::KdlNode, plugin: &str, key: &str) -> Result<Option<bool>> {
-    match node.get(key) {
+    match property_entry(node, key) {
         None => Ok(None),
-        Some(v) => match v.as_bool() {
-            Some(b) => Ok(Some(b)),
-            None => bail!("plugin \"{plugin}\": {key} must be a bool"),
-        },
+        Some(entry) => {
+            ensure!(
+                entry.ty().is_none(),
+                "plugin \"{plugin}\": {key} does not support KDL type annotations"
+            );
+            match entry.value().as_bool() {
+                Some(b) => Ok(Some(b)),
+                None => bail!("plugin \"{plugin}\": {key} must be a bool"),
+            }
+        }
     }
 }
 

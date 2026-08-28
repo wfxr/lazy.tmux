@@ -51,4 +51,4 @@ The alternatives either failed to provide true branch semantics or crossed tmup'
 
 The configuration parser retains an unresolved tree of runtime declarations until `init` resolves conditions, then flattens the selected declarations into the existing plugin specification and load plan. The loader and tmux command layer do not need conditional commands or `tmux if-shell` support.
 
-tmup 0.2.0 is the first version that supports Runtime Configuration Branches. Earlier versions may warn and ignore `if` and `else` plugin children, loading the plugin without their runtime declarations.
+Runtime Configuration Branches are planned for their first stable release in tmup 0.2.0. Earlier versions may warn and ignore `if` and `else` plugin children, loading the plugin without their runtime declarations.
