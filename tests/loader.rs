@@ -230,6 +230,98 @@ plugin "user/plugin-b" opt-prefix="b_" {
 }
 
 #[test]
+fn loader_phases_selected_runtime_configuration_in_source_order() {
+    let dir = tempdir().unwrap();
+    let plugin_root = dir.path().join("plugins");
+    let plugin_dir = plugin_root.join("github.com/user/plugin");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(plugin_dir.join("plugin.tmux"), "#!/bin/sh").unwrap();
+    let kdl = dir.path().join("tmup.kdl");
+    std::fs::write(
+        &kdl,
+        r#"
+plugin "user/plugin" opt-prefix="p_" {
+    env "OUTSIDE_BEFORE" "one"
+    opt "outside_before" "one"
+    bind "outside-before" { shell "./outside-before" }
+    if #true {
+        env "BRANCH_SET" "two"
+        unset-env "BRANCH_UNSET"
+        opt "branch_first" "two"
+        opt "branch_second" "three"
+        bind "branch-first" { shell "./branch-first" }
+        bind "branch-second" { shell "./branch-second" }
+    }
+    env "OUTSIDE_AFTER" "three"
+    unset-env "OUTSIDE_UNSET"
+    opt "outside_after" "four"
+    bind "outside-after" { shell "./outside-after" }
+}
+"#,
+    )
+    .unwrap();
+    let config = load_from_sources_with_intent(
+        ConfigMode::Pure,
+        Some(&kdl),
+        None,
+        ResolutionIntent::RuntimeConfiguration,
+    )
+    .unwrap()
+    .config;
+
+    let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
+    let commands: Vec<_> = plan.iter().cloned().collect();
+
+    assert_eq!(
+        commands,
+        vec![
+            TmuxCommand::SetEnvironment {
+                key: "TMUX_PLUGIN_MANAGER_PATH".into(),
+                value: format!("{}/", plugin_root.display()),
+            },
+            TmuxCommand::SetEnvironment { key: "OUTSIDE_BEFORE".into(), value: "one".into() },
+            TmuxCommand::SetEnvironment { key: "BRANCH_SET".into(), value: "two".into() },
+            TmuxCommand::UnsetEnvironment { key: "BRANCH_UNSET".into() },
+            TmuxCommand::SetEnvironment { key: "OUTSIDE_AFTER".into(), value: "three".into() },
+            TmuxCommand::UnsetEnvironment { key: "OUTSIDE_UNSET".into() },
+            TmuxCommand::SetOption { key: "p_outside_before".into(), value: "one".into() },
+            TmuxCommand::SetOption { key: "p_branch_first".into(), value: "two".into() },
+            TmuxCommand::SetOption { key: "p_branch_second".into(), value: "three".into() },
+            TmuxCommand::SetOption { key: "p_outside_after".into(), value: "four".into() },
+            TmuxCommand::RunShell { script: plugin_dir.join("plugin.tmux") },
+            TmuxCommand::BindKey {
+                options: vec![],
+                key: "outside-before".into(),
+                plugin_dir: plugin_dir.clone(),
+                shell: "./outside-before".into(),
+                background: false,
+            },
+            TmuxCommand::BindKey {
+                options: vec![],
+                key: "branch-first".into(),
+                plugin_dir: plugin_dir.clone(),
+                shell: "./branch-first".into(),
+                background: false,
+            },
+            TmuxCommand::BindKey {
+                options: vec![],
+                key: "branch-second".into(),
+                plugin_dir: plugin_dir.clone(),
+                shell: "./branch-second".into(),
+                background: false,
+            },
+            TmuxCommand::BindKey {
+                options: vec![],
+                key: "outside-after".into(),
+                plugin_dir,
+                shell: "./outside-after".into(),
+                background: false,
+            },
+        ]
+    );
+}
+
+#[test]
 fn loader_handles_missing_plugin_dir() {
     let dir = tempdir().unwrap();
     let plugin_root = dir.path().join("plugins");

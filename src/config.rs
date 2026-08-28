@@ -19,6 +19,22 @@ pub(crate) struct PluginDeclaration {
     pub(crate) spec: PluginSpec,
     pub(crate) enabled: Condition,
     pub(crate) load_condition: Condition,
+    pub(crate) runtime: Vec<RuntimeDeclaration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RuntimeDeclaration {
+    Option {
+        key: String,
+        value: String,
+    },
+    Environment(EnvironmentOperation),
+    Binding(KeyBinding),
+    Branch {
+        condition: Condition,
+        then_declarations: Vec<RuntimeDeclaration>,
+        else_declarations: Vec<RuntimeDeclaration>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,27 +140,38 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
     let mut opts = Vec::new();
     let mut environment = Vec::new();
     let mut bindings = Vec::new();
+    let mut runtime = Vec::new();
     let mut child_build: Option<String> = None;
     if let Some(children) = node.children() {
-        for child in children.nodes() {
+        let nodes = children.nodes();
+        let mut index = 0;
+        while index < nodes.len() {
+            let child = &nodes[index];
             match child.name().value() {
                 "opt" => {
-                    let key = child
-                        .get(0)
-                        .and_then(|v| v.as_string())
-                        .context("opt requires a key string")?
-                        .to_string();
-                    let value = child
-                        .get(1)
-                        .and_then(|v| v.as_string())
-                        .context("opt requires a value string")?
-                        .to_string();
-                    opts.push((key, value));
+                    let (key, value) = parse_plugin_option(child)?;
+                    opts.push((key.clone(), value.clone()));
+                    runtime.push(RuntimeDeclaration::Option { key, value });
                 }
                 "env" | "unset-env" => {
-                    environment.push(parse_environment_operation(child, &raw)?);
+                    let operation = parse_environment_operation(child, &raw)?;
+                    environment.push(operation.clone());
+                    runtime.push(RuntimeDeclaration::Environment(operation));
                 }
-                "bind" => bindings.push(parse_key_binding(child, &raw)?),
+                "bind" => {
+                    let binding = parse_key_binding(child, &raw)?;
+                    bindings.push(binding.clone());
+                    runtime.push(RuntimeDeclaration::Binding(binding));
+                }
+                "if" => {
+                    let (branch, consumed_else) =
+                        parse_runtime_branch(child, nodes.get(index + 1), &raw)?;
+                    runtime.push(branch);
+                    if consumed_else {
+                        index += 1;
+                    }
+                }
+                "else" => bail!("plugin \"{raw}\": else must immediately follow an if node"),
                 "build" => {
                     ensure!(
                         child_build.is_none(),
@@ -172,6 +199,7 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
                     warnings.push(format!("plugin \"{raw}\": ignoring unknown child \"{unknown}\""))
                 }
             }
+            index += 1;
         }
     }
 
@@ -215,7 +243,120 @@ fn parse_plugin(node: &kdl::KdlNode, warnings: &mut Vec<String>) -> Result<Plugi
         spec
     };
 
-    Ok(PluginDeclaration { spec: source, enabled, load_condition })
+    Ok(PluginDeclaration { spec: source, enabled, load_condition, runtime })
+}
+
+fn parse_runtime_branch(
+    if_node: &kdl::KdlNode,
+    next_node: Option<&kdl::KdlNode>,
+    plugin: &str,
+) -> Result<(RuntimeDeclaration, bool)> {
+    let condition = parse_runtime_branch_condition(if_node, plugin)?;
+    let then_declarations = parse_runtime_branch_body(if_node, plugin)?;
+    let else_node = next_node.filter(|node| node.name().value() == "else");
+    let else_declarations = else_node
+        .map(|node| {
+            ensure!(
+                node.entries().is_empty(),
+                "plugin \"{plugin}\": else must not have arguments or properties"
+            );
+            parse_runtime_branch_body(node, plugin)
+        })
+        .transpose()?
+        .unwrap_or_default();
+    Ok((
+        RuntimeDeclaration::Branch { condition, then_declarations, else_declarations },
+        else_node.is_some(),
+    ))
+}
+
+fn parse_runtime_branch_condition(node: &kdl::KdlNode, plugin: &str) -> Result<Condition> {
+    ensure!(
+        node.entries().iter().all(|entry| entry.name().is_none()),
+        "plugin \"{plugin}\": if must not have properties"
+    );
+    ensure!(node.entries().len() == 1, "plugin \"{plugin}\": if requires exactly one condition");
+    let entry = &node.entries()[0];
+    ensure!(entry.ty().is_none(), "plugin \"{plugin}\": if does not support KDL type annotations");
+    if let Some(value) = entry.value().as_bool() {
+        return Ok(Condition::Bool(value));
+    }
+    if let Some(value) = entry.value().as_string() {
+        ensure!(
+            !value.trim().is_empty(),
+            "plugin \"{plugin}\": if shell predicate must not be empty or whitespace-only"
+        );
+        return Ok(Condition::Shell(value.to_string()));
+    }
+    bail!("plugin \"{plugin}\": if condition must be a bool or shell predicate string")
+}
+
+fn parse_runtime_branch_body(node: &kdl::KdlNode, plugin: &str) -> Result<Vec<RuntimeDeclaration>> {
+    let children = node
+        .children()
+        .with_context(|| format!("plugin \"{plugin}\": {} requires a child block", node.name()))?;
+    let nodes = children.nodes();
+    let mut declarations = Vec::new();
+    let mut index = 0;
+    while index < nodes.len() {
+        let child = &nodes[index];
+        match child.name().value() {
+            "opt" => {
+                let (key, value) = parse_runtime_branch_option(child, plugin)?;
+                declarations.push(RuntimeDeclaration::Option { key, value });
+            }
+            "env" | "unset-env" => declarations
+                .push(RuntimeDeclaration::Environment(parse_environment_operation(child, plugin)?)),
+            "bind" => {
+                declarations.push(RuntimeDeclaration::Binding(parse_key_binding(child, plugin)?))
+            }
+            "if" => {
+                let (branch, consumed_else) =
+                    parse_runtime_branch(child, nodes.get(index + 1), plugin)?;
+                declarations.push(branch);
+                if consumed_else {
+                    index += 1;
+                }
+            }
+            "else" => bail!("plugin \"{plugin}\": else must immediately follow an if node"),
+            unknown => bail!(
+                "plugin \"{plugin}\": runtime configuration branch only allows opt, env, unset-env, bind, and nested if nodes (found \"{unknown}\")"
+            ),
+        }
+        index += 1;
+    }
+    Ok(declarations)
+}
+
+fn parse_runtime_branch_option(node: &kdl::KdlNode, plugin: &str) -> Result<(String, String)> {
+    ensure!(node.children().is_none(), "plugin \"{plugin}\": opt must not have child nodes");
+    ensure!(
+        node.entries().iter().all(|entry| entry.name().is_none()),
+        "plugin \"{plugin}\": opt must not have properties"
+    );
+    ensure!(
+        node.entries().len() == 2,
+        "plugin \"{plugin}\": opt requires exactly 2 string arguments"
+    );
+    ensure!(
+        node.entries().iter().all(|entry| entry.ty().is_none()),
+        "plugin \"{plugin}\": opt does not support KDL type annotations"
+    );
+    parse_plugin_option(node)
+}
+
+fn parse_plugin_option(node: &kdl::KdlNode) -> Result<(String, String)> {
+    let key = node
+        .get(0)
+        .and_then(|value| value.as_string())
+        .context("opt requires a key string")?
+        .to_string();
+    let value = node
+        .get(1)
+        .and_then(|value| value.as_string())
+        .context("opt requires a value string")?
+        .to_string();
+    Ok((key, value))
 }
 
 fn parse_key_binding(node: &kdl::KdlNode, plugin: &str) -> Result<KeyBinding> {

@@ -265,6 +265,157 @@ plugin "{}" local=#true cond=#false
 }
 
 #[test]
+fn runtime_configuration_selects_else_bindings_and_keeps_unconditional_bindings() {
+    let dir = tempdir().unwrap();
+    let kdl = dir.path().join("tmup.kdl");
+    write_file(
+        &kdl,
+        r#"
+plugin "user/repo" {
+    bind "always" { shell "./always" }
+    if #false {
+        bind "then" { shell "./then" }
+    }
+    else {
+        bind "otherwise" { shell "./otherwise" }
+    }
+}
+"#,
+    );
+
+    let loaded = load_from_sources_with_intent(
+        ConfigMode::Pure,
+        Some(&kdl),
+        None,
+        ResolutionIntent::RuntimeConfiguration,
+    )
+    .unwrap();
+
+    let keys: Vec<_> =
+        loaded.config.plugins[0].bindings.iter().map(|binding| binding.key.as_str()).collect();
+    assert_eq!(keys, ["always", "otherwise"]);
+}
+
+#[test]
+fn runtime_configuration_shell_predicates_use_config_directory_and_short_circuit_nested_else() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("config");
+    let kdl = config_dir.join("tmup.kdl");
+    write_file(&config_dir.join("host-marker"), "ready\n");
+    write_file(
+        &kdl,
+        r#"
+plugin "user/repo" {
+    if "test -f host-marker" {
+        bind "host" { shell "./host" }
+    }
+    else {
+        if "kill -TERM $$" {
+            bind "unreachable" { shell "./unreachable" }
+        }
+    }
+}
+"#,
+    );
+
+    let loaded = load_from_sources_with_intent(
+        ConfigMode::Pure,
+        Some(&kdl),
+        None,
+        ResolutionIntent::RuntimeConfiguration,
+    )
+    .unwrap();
+
+    let keys: Vec<_> =
+        loaded.config.plugins[0].bindings.iter().map(|binding| binding.key.as_str()).collect();
+    assert_eq!(keys, ["host"]);
+}
+
+#[test]
+fn invalid_runtime_configuration_branch_forms_are_rejected_before_predicates_run() {
+    let dir = tempdir().unwrap();
+    let kdl = dir.path().join("tmup.kdl");
+    let cases = [
+        ("if {}", "if requires exactly one condition"),
+        ("if #true #false {}", "if requires exactly one condition"),
+        ("if 42 {}", "if condition must be a bool or shell predicate string"),
+        (r#"if "" {}"#, "if shell predicate must not be empty"),
+        ("if #true future=#true {}", "if must not have properties"),
+        ("if (future)#true {}", "if does not support KDL type annotations"),
+        ("if #true", "if requires a child block"),
+        ("if #true {}\nelse \"entry\" {}", "else must not have arguments or properties"),
+        ("if #true {}\nelse", "else requires a child block"),
+        ("else {}", "else must immediately follow an if node"),
+        (
+            "if #true {}\nbind \"x\" { shell \"true\" }\nelse {}",
+            "else must immediately follow an if node",
+        ),
+        ("if #true {}\nelse {}\nelse {}", "else must immediately follow an if node"),
+        ("/-if #true {}\nelse {}", "else must immediately follow an if node"),
+        ("if #true {}\nelse { build \"make\" }", "runtime configuration branch only allows"),
+        ("if #true {}\nelse { enabled #false }", "runtime configuration branch only allows"),
+        ("if #true {}\nelse { cond #false }", "runtime configuration branch only allows"),
+        ("if #true {}\nelse { plugin \"other/repo\" }", "runtime configuration branch only allows"),
+        ("if #true {}\nelse { future \"value\" }", "runtime configuration branch only allows"),
+        (
+            "if #true {}\nelse { opt \"key\" \"value\" \"extra\" }",
+            "opt requires exactly 2 string arguments",
+        ),
+    ];
+
+    for (index, (branch, expected)) in cases.into_iter().enumerate() {
+        let marker = dir.path().join(format!("predicate-ran-{index}"));
+        write_file(
+            &kdl,
+            &format!(
+                "plugin \"user/first\" enabled=\"touch {}\"\nplugin \"user/repo\" {{\n{branch}\n}}",
+                marker.display()
+            ),
+        );
+
+        let error = load_from_sources_with_intent(
+            ConfigMode::Pure,
+            Some(&kdl),
+            None,
+            ResolutionIntent::RuntimeConfiguration,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains(expected), "branch={branch:?}, error={error:#}");
+        assert!(!marker.exists(), "branch={branch:?}: predicates must run after validation");
+    }
+}
+
+#[test]
+fn runtime_configuration_allows_empty_branches() {
+    let dir = tempdir().unwrap();
+    let kdl = dir.path().join("tmup.kdl");
+    write_file(
+        &kdl,
+        r#"
+plugin "user/repo" {
+    if #true {
+    }
+    else {
+    }
+}
+"#,
+    );
+
+    let loaded = load_from_sources_with_intent(
+        ConfigMode::Pure,
+        Some(&kdl),
+        None,
+        ResolutionIntent::RuntimeConfiguration,
+    )
+    .unwrap();
+
+    assert!(loaded.config.plugins[0].environment.is_empty());
+    assert!(loaded.config.plugins[0].opts.is_empty());
+    assert!(loaded.config.plugins[0].bindings.is_empty());
+}
+
+#[test]
 fn shell_enable_conditions_use_config_directory_and_nonzero_is_false() {
     let dir = tempdir().unwrap();
     let config_dir = dir.path().join("nested");
@@ -336,6 +487,54 @@ fn mixed_mode_preserves_tpm_order_and_applies_kdl_load_conditions_after_merge() 
         loaded.config.load_eligibility().map(|eligibility| eligibility.values()),
         Some(&[false, true][..])
     );
+}
+
+#[test]
+fn mixed_mode_projects_kdl_runtime_configuration_in_the_tpm_slot() {
+    let dir = tempdir().unwrap();
+    let kdl = dir.path().join("tmup.kdl");
+    let tpm = dir.path().join("tmux.conf");
+    write_file(
+        &kdl,
+        r#"
+plugin "user/repo" branch="feature" {
+    if #false {
+        bind "then" { shell "./then" }
+    }
+    else {
+        bind "otherwise" { shell "./otherwise" }
+    }
+}
+"#,
+    );
+    write_file(
+        &tpm,
+        concat!(
+            "set -g @plugin 'user/first'\n",
+            "set -g @plugin 'user/repo'\n",
+            "set -g @plugin 'user/last'\n",
+        ),
+    );
+
+    let loaded = load_from_sources_with_intent(
+        ConfigMode::Mixed,
+        Some(&kdl),
+        Some(&tpm),
+        ResolutionIntent::RuntimeConfiguration,
+    )
+    .unwrap();
+
+    let ids: Vec<_> =
+        loaded.config.plugins.iter().filter_map(|plugin| plugin.remote_id()).collect();
+    assert_eq!(ids, ["github.com/user/first", "github.com/user/repo", "github.com/user/last"]);
+    assert!(matches!(
+        &loaded.config.plugins[1].tracking,
+        Tracking::Branch(branch) if branch == "feature"
+    ));
+    let keys: Vec<_> =
+        loaded.config.plugins[1].bindings.iter().map(|binding| binding.key.as_str()).collect();
+    assert_eq!(keys, ["otherwise"]);
+    assert_eq!(loaded.warnings.len(), 1);
 }
 
 #[test]

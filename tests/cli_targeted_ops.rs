@@ -121,11 +121,22 @@ fn standalone_lifecycle_commands_do_not_evaluate_load_conditions() {
     let config_path = dir.path().join("config/tmux/tmup.kdl");
     write_file(
         &config_path,
-        r#"plugin "https://example.com/test/plugin.git" cond="kill -TERM $$""#,
+        r#"
+plugin "https://example.com/test/plugin.git" cond="kill -TERM $$" {
+    if "kill -TERM $$" {
+        bind "unreachable" { shell "./unreachable" }
+    }
+}
+"#,
     );
     let gitconfig = write_git_rewrite_config(dir.path());
 
     for command in ["sync", "install", "update", "restore", "clean"] {
-        cargo_cmd(dir.path(), &config_path, &gitconfig).arg(command).assert().success();
+        cargo_cmd(dir.path(), &config_path, &gitconfig)
+            .arg(command)
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("if shell predicate").not())
+            .stderr(predicate::str::contains("unknown child").not());
     }
 }

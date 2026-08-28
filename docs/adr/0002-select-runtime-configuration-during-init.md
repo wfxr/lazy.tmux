@@ -1,10 +1,10 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Select runtime configuration during init
 
-tmup can conditionally include or load a plugin as a whole, but an enabled and load-eligible plugin cannot select different runtime options, environment operations, or bindings for different Execution Hosts. We will add Runtime Configuration Branches so one plugin declaration can keep its source and configuration together while selecting runtime declarations through mutually exclusive branches during an Init Session.
+tmup can conditionally include or load a plugin as a whole, but an enabled and load-eligible plugin also needs to select different runtime options, environment operations, or bindings for different Execution Hosts. Runtime Configuration Branches keep a plugin's source and configuration together while selecting runtime declarations through mutually exclusive branches during an Init Session.
 
 ## Decision
 
@@ -16,7 +16,8 @@ plugin "wfxr/tmux-fzf" {
         bind "M-w" {
             shell "scripts/session.sh attach" background=#true
         }
-    } else {
+    }
+    else {
         bind "C-w" {
             shell "scripts/session.sh attach" background=#true
         }
@@ -48,6 +49,6 @@ The alternatives either failed to provide true branch semantics or crossed tmup'
 
 ## Consequences
 
-The configuration parser must retain an unresolved tree of runtime declarations until `init` resolves conditions, then flatten the selected declarations into the existing plugin specification and load plan. The loader and tmux command layer do not need conditional commands or `tmux if-shell` support.
+The configuration parser retains an unresolved tree of runtime declarations until `init` resolves conditions, then flattens the selected declarations into the existing plugin specification and load plan. The loader and tmux command layer do not need conditional commands or `tmux if-shell` support.
 
-tmup versions that do not recognize `if` and `else` plugin children may warn and ignore both branches, loading the plugin without their runtime declarations. User-facing documentation must identify the first version that supports Runtime Configuration Branches. README and stable design documentation must not advertise the syntax until the implementation exists.
+tmup 0.2.0 is the first version that supports Runtime Configuration Branches. Earlier versions may warn and ignore `if` and `else` plugin children, loading the plugin without their runtime declarations.

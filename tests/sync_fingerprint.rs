@@ -2,7 +2,9 @@ mod utils;
 
 use tempfile::tempdir;
 use tmup::config::parse_config;
-use tmup::config_mode::{ConfigMode, load_from_sources};
+use tmup::config_mode::{
+    ConfigMode, ResolutionIntent, load_from_sources, load_from_sources_with_intent,
+};
 use tmup::lockfile::{config_fingerprint, remote_plugin_config_hash};
 use utils::write_file;
 
@@ -155,6 +157,56 @@ fn load_conditions_do_not_affect_plugin_or_config_fingerprints() {
     let first = load_from_sources(ConfigMode::Pure, Some(&first), None).unwrap();
     let second = load_from_sources(ConfigMode::Pure, Some(&second), None).unwrap();
 
+    assert_eq!(
+        remote_plugin_config_hash(&first.config.plugins[0]),
+        remote_plugin_config_hash(&second.config.plugins[0]),
+    );
+    assert_eq!(config_fingerprint(&first.config), config_fingerprint(&second.config));
+}
+
+#[test]
+fn runtime_configuration_predicates_and_selected_contents_do_not_affect_fingerprints() {
+    let dir = tempdir().unwrap();
+    let first = dir.path().join("first/tmup.kdl");
+    let second = dir.path().join("second/tmup.kdl");
+    write_file(
+        &first,
+        r#"
+plugin "user/repo" {
+    if "exit 0" {
+        bind "first" { shell "./first" }
+    }
+}
+"#,
+    );
+    write_file(
+        &second,
+        r#"
+plugin "user/repo" {
+    if "test 1 = 1" {
+        bind "second" { shell "./second" }
+    }
+}
+"#,
+    );
+
+    let first = load_from_sources_with_intent(
+        ConfigMode::Pure,
+        Some(&first),
+        None,
+        ResolutionIntent::RuntimeConfiguration,
+    )
+    .unwrap();
+    let second = load_from_sources_with_intent(
+        ConfigMode::Pure,
+        Some(&second),
+        None,
+        ResolutionIntent::RuntimeConfiguration,
+    )
+    .unwrap();
+
+    assert_eq!(first.config.plugins[0].bindings[0].key, "first");
+    assert_eq!(second.config.plugins[0].bindings[0].key, "second");
     assert_eq!(
         remote_plugin_config_hash(&first.config.plugins[0]),
         remote_plugin_config_hash(&second.config.plugins[0]),

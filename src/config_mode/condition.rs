@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 
-use crate::config::{Condition, PluginDeclaration};
+use crate::config::{Condition, PluginDeclaration, RuntimeDeclaration};
 use crate::config_mode::ResolutionIntent;
-use crate::model::PluginSpec;
+use crate::model::{EnvironmentOperation, KeyBinding, PluginSpec};
 
 const CONDITION_TIMEOUT: Duration = Duration::from_secs(5);
 const CONDITION_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -145,7 +145,10 @@ fn resolve_plugins_with_runner(
         .filter_map(|(declaration, enabled)| enabled.then_some(declaration))
         .collect();
 
-    let load_eligibility = if matches!(intent, ResolutionIntent::LoadEligibility) {
+    let load_eligibility = if matches!(
+        intent,
+        ResolutionIntent::LoadEligibility | ResolutionIntent::RuntimeConfiguration
+    ) {
         let mut eligibility = Vec::with_capacity(enabled_declarations.len());
         for declaration in &enabled_declarations {
             eligibility.push(evaluate_condition(
@@ -160,9 +163,74 @@ fn resolve_plugins_with_runner(
     } else {
         None
     };
-    let plugins = enabled_declarations.into_iter().map(|declaration| declaration.spec).collect();
+    let plugins = enabled_declarations
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut declaration)| {
+            if matches!(intent, ResolutionIntent::RuntimeConfiguration)
+                && load_eligibility.as_ref().is_some_and(|values| values[index])
+            {
+                let projection = project_runtime_configuration(&declaration, working_dir, process)?;
+                declaration.spec.opts = projection.opts;
+                declaration.spec.environment = projection.environment;
+                declaration.spec.bindings = projection.bindings;
+            }
+            Ok(declaration.spec)
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(ResolvedPlugins { plugins, load_eligibility })
+}
+
+#[derive(Default)]
+struct RuntimeProjection {
+    opts: Vec<(String, String)>,
+    environment: Vec<EnvironmentOperation>,
+    bindings: Vec<KeyBinding>,
+}
+
+fn project_runtime_configuration(
+    declaration: &PluginDeclaration,
+    working_dir: &Path,
+    process: &impl ConditionProcess,
+) -> Result<RuntimeProjection> {
+    let mut projection = RuntimeProjection::default();
+    project_runtime_declarations(
+        &declaration.runtime,
+        declaration,
+        working_dir,
+        process,
+        &mut projection,
+    )?;
+    Ok(projection)
+}
+
+fn project_runtime_declarations(
+    declarations: &[RuntimeDeclaration],
+    plugin: &PluginDeclaration,
+    working_dir: &Path,
+    process: &impl ConditionProcess,
+    projection: &mut RuntimeProjection,
+) -> Result<()> {
+    for declaration in declarations {
+        match declaration {
+            RuntimeDeclaration::Option { key, value } => {
+                projection.opts.push((key.clone(), value.clone()));
+            }
+            RuntimeDeclaration::Environment(operation) => {
+                projection.environment.push(operation.clone());
+            }
+            RuntimeDeclaration::Binding(binding) => {
+                projection.bindings.push(binding.clone());
+            }
+            RuntimeDeclaration::Branch { condition, then_declarations, else_declarations } => {
+                let selected = evaluate_condition(condition, plugin, "if", working_dir, process)?;
+                let selected = if selected { then_declarations } else { else_declarations };
+                project_runtime_declarations(selected, plugin, working_dir, process, projection)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn evaluate_condition(

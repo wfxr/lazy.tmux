@@ -241,7 +241,7 @@ fn resolve_normal_invocation(
         config_mode,
         false,
         tpm_policy,
-        ResolutionIntent::LoadEligibility,
+        ResolutionIntent::RuntimeConfiguration,
     );
     let loaded = config_mode::load_with_request(&paths, request)?;
     let context = InvocationContext::new(
@@ -317,7 +317,7 @@ fn load_context(context: &InvocationContext) -> Result<LoadedContext> {
         context.config_mode,
         false,
         tpm_policy,
-        ResolutionIntent::LoadEligibility,
+        ResolutionIntent::RuntimeConfiguration,
     );
     let loaded = config_mode::load_with_request(&paths, request)?;
     Ok(LoadedContext { paths: loaded.paths, config: loaded.config, warnings: loaded.warnings })
@@ -1309,6 +1309,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn init_runtime_configuration_respects_enable_and_load_gates() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        let disabled_dir = dir.path().join("disabled-plugin");
+        let skipped_dir = dir.path().join("skipped-plugin");
+        let loaded_dir = dir.path().join("loaded-plugin");
+        for plugin_dir in [&disabled_dir, &skipped_dir, &loaded_dir] {
+            std::fs::create_dir_all(plugin_dir).unwrap();
+        }
+        write_config(
+            &context,
+            &format!(
+                r#"
+plugin "{}" local=#true enabled=#false {{
+    if "kill -TERM $$" {{
+        bind "disabled" {{ shell "./disabled" }}
+    }}
+}}
+plugin "{}" local=#true cond=#false {{
+    if "kill -TERM $$" {{
+        bind "skipped" {{ shell "./skipped" }}
+    }}
+}}
+plugin "{}" local=#true {{
+    if #false {{
+        bind "then" {{ shell "./then" }}
+    }}
+    else {{
+        bind "otherwise" {{ shell "./otherwise" }}
+    }}
+}}
+"#,
+                disabled_dir.display(),
+                skipped_dir.display(),
+                loaded_dir.display(),
+            ),
+        );
+        let mut tmux = MockTmux::hosted();
+
+        let outcome = run_with_adapter(context.clone(), &mut tmux).await.unwrap();
+
+        assert_eq!(outcome, Outcome::Completed);
+        assert_eq!(
+            tmux.requests,
+            vec![Request::Load(vec![
+                TmuxCommand::SetEnvironment {
+                    key: "TMUX_PLUGIN_MANAGER_PATH".into(),
+                    value: format!("{}/", context.data_root.join("plugins").display()),
+                },
+                TmuxCommand::BindKey {
+                    options: vec![],
+                    key: "otherwise".into(),
+                    plugin_dir: loaded_dir,
+                    shell: "./otherwise".into(),
+                    background: false,
+                },
+            ])]
+        );
+    }
+
+    #[tokio::test]
     async fn init_preview_is_advisory_and_execution_uses_one_frozen_snapshot() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
@@ -1346,6 +1407,63 @@ mod tests {
         assert!(
             plan.iter().all(|command| matches!(command, TmuxCommand::SetEnvironment { .. })),
             "the same authoritative false snapshot must drive loading: {plan:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_configuration_preview_is_advisory_and_authoritative_snapshot_is_frozen() {
+        let dir = tempdir().unwrap();
+        let context = context(dir.path());
+        let plugin_dir = dir.path().join("local-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        write_config(
+            &context,
+            &format!(
+                r#"
+plugin "{}" local=#true {{
+    if "n=$(cat branch-evaluations 2>/dev/null || printf 0); n=$((n+1)); printf %s $n > branch-evaluations; test $n -eq 1" {{
+        bind "preview" {{ shell "./preview" }}
+    }}
+    else {{
+        bind "authoritative" {{ shell "./authoritative" }}
+    }}
+}}
+"#,
+                plugin_dir.display(),
+            ),
+        );
+        let mut tmux = MockTmux::hosted();
+
+        let outcome = run_with_adapter(context.clone(), &mut tmux).await.unwrap();
+
+        assert_eq!(outcome, Outcome::Completed);
+        assert_eq!(
+            std::fs::read_to_string(
+                context.config_path.parent().unwrap().join("branch-evaluations")
+            )
+            .unwrap(),
+            "2",
+            "init may evaluate the branch once for preview and once for authoritative execution"
+        );
+        let Request::Load(plan) = tmux.requests.last().unwrap() else {
+            panic!("init must execute its tmux load plan");
+        };
+        assert_eq!(
+            plan,
+            &vec![
+                TmuxCommand::SetEnvironment {
+                    key: "TMUX_PLUGIN_MANAGER_PATH".into(),
+                    value: format!("{}/", context.data_root.join("plugins").display()),
+                },
+                TmuxCommand::BindKey {
+                    options: vec![],
+                    key: "authoritative".into(),
+                    plugin_dir,
+                    shell: "./authoritative".into(),
+                    background: false,
+                },
+            ],
+            "loading must use the frozen authoritative branch selection"
         );
     }
 

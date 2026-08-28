@@ -73,24 +73,36 @@ format fields, or UI/progress behavior), it does not belong here.
 Conditions separate host-specific managed state from tmux loading without
 weakening lock-backed lifecycle guarantees. See
 [ADR 0001](adr/0001-separate-plugin-inclusion-from-loading.md) for the trade-offs
-behind this boundary.
+behind plugin inclusion and loading, and see
+[ADR 0002](adr/0002-select-runtime-configuration-during-init.md) for runtime
+configuration selection.
 
 - Enable Conditions project declarations into one Effective Plugin
   Specification per Execution Host.
 - Load Conditions only control whether an Init Session applies a plugin's
   environment operations and options, runs its scripts, and registers its
   bindings; they do not change managed state.
-- Conditional loading is scoped to the tmux server's Execution Host, not to
-  individual clients.
-- A false Load Condition does not undo effects from an earlier load.
+- Runtime Configuration Branches select plugin runtime declarations without
+  changing the Effective Plugin Specification, Load Eligibility, lock
+  membership, or lock fingerprints.
+- An authoritative Init Session evaluates branches only for plugins with Load
+  Eligibility and freezes the selection before managed-state mutation.
+- Conditional loading and branch selection are scoped to the tmux server's
+  Execution Host, not to individual clients.
+- A false Load Condition or changed branch selection does not reconcile or undo
+  effects from an earlier load.
 
 ## TPM Compatibility Contract (Stable Surface)
 
 - Compatibility is defined as: initialize the plugin manager path, then apply
-  each plugin's ordered tmux environment operations and options for all plugins
-  with Load Eligibility that were not excluded by a reconciliation failure,
-  then load their `*.tmux` scripts in effective declaration order and register
-  all explicit bindings in plugin and node declaration order.
+  each plugin's ordered, projected tmux environment operations and options for
+  all plugins with Load Eligibility that were not excluded by a reconciliation
+  failure, then load their `*.tmux` scripts in effective declaration order and
+  register all projected explicit bindings in plugin and node declaration
+  order.
+- Runtime Configuration Branches flatten into the existing load phases. Source
+  order remains authoritative within the environment and option phase and the
+  binding phase; plugin scripts remain between those phases.
 - A plugin reconciliation failure omits every runtime command for that plugin
   from the current Init Session, even when staged-publish rollback preserves an
   older installed revision and lock entry.
@@ -102,9 +114,10 @@ behind this boundary.
   plugin.
 - Runtime loading is not transactional. Environment values, options, script
   effects, and bindings that completed before a later failure remain applied.
-- Runtime environment and binding declarations are replayed only by `init`.
-  They do not affect lock fingerprints, and removing a declaration does not
-  clean up an effect from an earlier Init Session.
+- Runtime declarations, including branch contents, are replayed only by
+  `init`. They do not affect lock fingerprints, and removing a declaration or
+  selecting another branch does not clean up an effect from an earlier Init
+  Session.
 - Binding shell actions run through `/bin/sh` from the resolved plugin
   directory. This contract does not require native `run-shell -c`, tmux version
   detection, duplicate binding checks, or automatic unbinding.
@@ -120,7 +133,8 @@ behind this boundary.
 - Treating local plugin paths as lock-managed remote plugins.
 - Guaranteeing behavior for manual, in-place mutation of tmup-managed repos.
 - Providing client-specific plugin loading within one tmux server.
-- Unloading or reversing arbitrary plugin effects when a Load Condition changes.
+- Reconciling or reversing arbitrary plugin effects when a Load Condition or
+  Runtime Configuration Branch selection changes.
 
 ## Change Discipline
 

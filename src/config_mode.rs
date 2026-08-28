@@ -29,6 +29,8 @@ pub enum ResolutionIntent {
     ManagedState,
     /// Also resolve Load Eligibility for each enabled plugin.
     LoadEligibility,
+    /// Resolve Load Eligibility and Runtime Configuration Branches for an Init Session.
+    RuntimeConfiguration,
 }
 
 /// One resolved Effective Plugin Specification with optional Load Eligibility.
@@ -339,6 +341,7 @@ fn merge_configs(mut kdl: ParsedConfig, tpm: Config) -> ParsedConfig {
                 spec: plugin,
                 enabled: Condition::Bool(true),
                 load_condition: Condition::Bool(true),
+                runtime: Vec::new(),
             });
         }
     }

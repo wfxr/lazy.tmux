@@ -53,6 +53,8 @@ lazy.nvim's design philosophy to tmux:
   out of the box.
 - **Conditional inclusion and loading** — reuse one config across hosts while
   choosing independently whether tmup manages or loads each plugin.
+- **Conditional runtime configuration** — select host-specific plugin options,
+  environment operations, and bindings during `init`.
 
 ## Installation
 
@@ -273,9 +275,15 @@ plugin "wfxr/tmux-fzf" {
     env "TMUX_FZF_LAUNCH_KEY" "C-f"
     env "TMUX_FZF_OPTIONS" "-p -w 62% -h 38% -m --border=none"
     unset-env "OLD_TMUX_FZF_OPTION"
-    bind "C-w" {
-        options "-n" "-r"
-        shell "scripts/session.sh attach" background=#true
+    if #"[ -n "$SSH_CLIENT" ] || [ -f /.dockerenv ]"# {
+        bind "M-w" {
+            shell "scripts/session.sh attach" background=#true
+        }
+    }
+    else {
+        bind "C-w" {
+            shell "scripts/session.sh attach" background=#true
+        }
     }
 }
 
@@ -332,8 +340,8 @@ plugin "company/remote-tools" cond=#"[ -n "$SSH_CLIENT" ]"#
 > `enabled` predicate while it continues to evaluate true does not affect the
 > fingerprint. If `enabled` becomes false for a remote plugin, that plugin
 > leaves the specification and lock snapshot, which changes the fingerprint.
-> `cond` values, predicate text, and Load Eligibility do not affect lock
-> fingerprints.
+> `cond` values, predicate text, Load Eligibility, and Runtime Configuration
+> Branch predicates and contents do not affect lock fingerprints.
 
 ### Plugin child nodes
 
@@ -347,6 +355,8 @@ remote and local plugins with Load Eligibility during `tmup init`.
 | `unset-env` | non-empty name string | Remove a value from the tmux global environment |
 | `bind` | non-empty key string, child block | Register one plugin-scoped shell binding after all plugin scripts load |
 | `build` | command string | Alternative child form of the `build` property |
+| `if` | bool or non-empty shell predicate, child block | Select runtime declarations during `init` |
+| `else` | child block | Optional fallback immediately following an `if` node |
 
 `env` values are literal. tmup doesn't expand shell syntax, `~`, process
 environment variables, or plugin-directory placeholders in them. Environment
@@ -443,9 +453,11 @@ plugin, not whether a previous load still affects the tmux server.
 tmup validates all declarations and merges mixed-mode sources before running
 predicates. It evaluates Enable Conditions sequentially in effective
 declaration order, then evaluates Load Conditions only for enabled plugins.
-Each command freezes one result snapshot. An Init Session may evaluate an
-advisory preview, but its final execution rereads the inherited config and
-resolves one authoritative snapshot before managed-state mutation.
+During `init`, it then evaluates Runtime Configuration Branches only for
+plugins with Load Eligibility. Each command freezes one result snapshot. An
+Init Session may evaluate an advisory preview, but its final execution rereads
+the inherited config and resolves one authoritative snapshot before
+managed-state mutation.
 
 Use stable host properties for `enabled`. Environment values such as
 `SSH_CLIENT` may differ between direct shell commands and commands launched
@@ -462,6 +474,44 @@ properties, and reserved condition child or type-annotation syntax are errors.
 Older tmup versions may ignore condition properties and load affected plugins
 unconditionally, so conditional configs require a version that documents these
 properties.
+
+### Runtime Configuration Branches
+
+Runtime Configuration Branches, available since tmup 0.2.0, select different
+runtime declarations for an enabled, load-eligible plugin without changing its
+managed or locked state. Remote and local plugins can mix unconditional
+declarations with multiple independent `if` nodes, and branches can contain
+nested `if` nodes. Each `if` accepts one KDL bool or non-empty shell predicate
+and an optional, immediately following `else` node.
+
+A branch is a closed language: it may contain only `opt`, `env`, `unset-env`,
+`bind`, and nested `if` nodes. Empty branches are valid. Every command validates
+the complete tree, including unselected branches. An orphaned, repeated, or
+non-adjacent `else`, a malformed recognized node, `build`, plugin conditions,
+plugin declarations, and unknown nodes are configuration errors. Because `if`
+and `else` are separate KDL nodes, put `else` on the next line after the `if`
+node's closing brace, as shown in the full example.
+
+Only `init` evaluates Runtime Configuration Branch predicates. It evaluates
+them after Enable and Load Conditions, only for plugins with Load Eligibility,
+and freezes the selected declarations before managed-state mutation. `list`
+and lifecycle commands still parse and validate branches, but don't evaluate
+them. Shell predicates use the same process environment, configuration working
+directory, five-second timeout, output suppression, and hard-error behavior as
+plugin conditions. Plugin `env` declarations are applied later and can't
+affect predicate evaluation.
+
+After selection, tmup flattens unconditional and selected declarations at
+their source positions. Loading keeps the existing global phases: environment
+operations and options for all eligible plugins, then sorted plugin scripts,
+then explicit bindings. Source order remains authoritative within each phase,
+and tmux keeps its normal last-write-wins behavior.
+
+Branch selection applies to the tmux server's Execution Host, not to one
+client, session, or pane. A later `init` that selects another branch doesn't
+undo earlier options, environment effects, or bindings; clean them up
+explicitly or restart the tmux server. Values such as `SSH_CLIENT` may be stale
+in a long-lived tmux server and don't identify the currently attaching client.
 
 ### Option mechanism
 
@@ -493,7 +543,8 @@ Designed for `run-shell "tmup init"` in `.tmux.conf`.
 1. **Acquire global lock** — hold it through final condition resolution, sync,
    and plugin loading so concurrent writers cannot modify state mid-init.
 2. **Resolve conditions** — reread the inherited config and freeze one
-   authoritative Effective Plugin Specification and Load Eligibility snapshot.
+   authoritative Effective Plugin Specification, Load Eligibility, and Runtime
+   Configuration Branch selection snapshot.
 3. **Implicit sync** — reconcile `tmup.kdl` into `tmup.lock` before any
    mutating work. Existing declared plugins may be repaired; removed plugins
    drop lock entries immediately.
@@ -501,10 +552,11 @@ Designed for `run-shell "tmup init"` in `.tmux.conf`.
    when `auto-install=true`. Use `tmup clean` to remove undeclared plugin
    directories.
 5. **Load tmux state** — initialize `TMUX_PLUGIN_MANAGER_PATH`, apply every
-   eligible plugin's ordered environment operations and options in declaration
-   order, source all eligible plugins' sorted `*.tmux` files, then register all
-   explicit bindings in plugin and node declaration order. Each phase omits
-   plugins excluded by a reconciliation failure.
+   eligible plugin's ordered unconditional and selected environment operations
+   and options in declaration order, source all eligible plugins' sorted
+   `*.tmux` files, then register all explicit bindings in plugin and node
+   declaration order. Each phase omits plugins excluded by a reconciliation
+   failure.
 
 If a remote plugin fails synchronization, preparation, or its staged build,
 that plugin contributes no runtime configuration during the Init Session. This
@@ -644,6 +696,7 @@ This boundary is intentional, not an oversight.
 
 - [x] **Concurrent operations** — parallel git clone/fetch across plugins (`concurrency` config option)
 - [x] **Conditional plugins** — host-specific managed state and independent Load Eligibility
+- [x] **Runtime configuration branches** — host-specific runtime declarations without changing managed state
 - [ ] **Incremental fetch** — reuse healthy local repos (fetch + resolve) instead of fresh clone on every sync/install
 
 ## License

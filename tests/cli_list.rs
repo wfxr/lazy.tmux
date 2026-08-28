@@ -355,3 +355,34 @@ plugin "user/skipped" cond="echo predicate-stdout; echo predicate-stderr >&2; ex
     assert!(!stdout.contains("predicate-stdout"));
     assert!(!stderr.contains("predicate-stderr"));
 }
+
+#[test]
+fn list_recognizes_runtime_configuration_without_evaluating_it() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("config/tmux");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_path = config_dir.join("tmup.kdl");
+    std::fs::write(
+        &config_path,
+        r#"
+plugin "user/repo" {
+    if "kill -TERM $$" {
+        bind "unreachable" { shell "./unreachable" }
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("tmup")
+        .unwrap()
+        .arg("list")
+        .env("TMUP_CONFIG", &config_path)
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("XDG_STATE_HOME", dir.path().join("state"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("user/repo"))
+        .stderr(predicate::str::contains("if shell predicate").not())
+        .stderr(predicate::str::contains("unknown child").not());
+}

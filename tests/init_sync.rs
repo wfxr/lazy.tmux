@@ -1014,6 +1014,49 @@ fn public_init_hard_load_condition_error_precedes_managed_directory_creation() {
 
 #[cfg(unix)]
 #[test]
+fn public_init_hard_runtime_branch_error_precedes_remote_install_and_tmux_loading() {
+    let dir = tempdir().unwrap();
+    make_remote_repo(dir.path());
+    let gitconfig = write_git_rewrite_config(dir.path());
+    let config_path = dir.path().join("tmup.kdl");
+    write_file(
+        &config_path,
+        r#"
+options { auto-install #true }
+plugin "https://example.com/test/plugin.git" {
+    if "kill -TERM $$" {
+        bind "unreachable" { shell "./unreachable" }
+    }
+}
+"#,
+    );
+    let tmux_log = dir.path().join("tmux.log");
+    let fake_tmux_dir = write_recording_tmux(dir.path(), &tmux_log);
+    let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
+
+    let output = public_init_command(&config_path, dir.path(), &path)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("if shell predicate terminated by a signal"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!dir.path().join("tmup.lock").exists(), "branch failure must not create a lock entry");
+    assert!(
+        !dir.path().join("data/tmup/plugins/example.com/test/plugin").exists(),
+        "branch failure must precede the managed checkout"
+    );
+    assert!(!tmux_log.exists(), "branch failure must precede all tmux loading effects");
+}
+
+#[cfg(unix)]
+#[test]
 fn public_init_does_not_advance_a_locked_remote_revision() {
     let dir = tempdir().unwrap();
     let bare = make_remote_repo(dir.path());
