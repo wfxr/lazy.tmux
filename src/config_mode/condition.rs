@@ -141,52 +141,53 @@ fn resolve_plugins_with_runner(
         )?);
     }
 
-    let enabled_declarations: Vec<_> = declarations
+    let mut enabled_declarations: Vec<_> = declarations
         .into_iter()
         .zip(enabled)
         .filter_map(|(declaration, enabled)| enabled.then_some(declaration))
         .collect();
 
-    let load_eligibility = if matches!(
-        intent,
-        ResolutionIntent::LoadEligibility | ResolutionIntent::RuntimeConfiguration
-    ) {
-        let mut eligibility = Vec::with_capacity(enabled_declarations.len());
-        for declaration in &enabled_declarations {
-            eligibility.push(evaluate_condition(
-                &declaration.load_condition,
-                declaration,
-                "cond",
-                working_dir,
-                process,
-            )?);
-        }
-        Some(eligibility)
-    } else {
-        None
-    };
-    let mut plugins = Vec::with_capacity(enabled_declarations.len());
-    for (index, mut declaration) in enabled_declarations.into_iter().enumerate() {
-        if matches!(intent, ResolutionIntent::RuntimeConfiguration)
-            && load_eligibility.as_ref().is_some_and(|values| values[index])
-        {
-            let projection = project_runtime_configuration(&declaration, working_dir, process)?;
-            declaration.spec.runtime = PluginRuntimeConfiguration::Selected(projection);
-        } else {
-            declaration.spec.runtime = PluginRuntimeConfiguration::Unresolved;
-        }
-        plugins.push(declaration.spec);
-    }
-
     let state = match intent {
         ResolutionIntent::ManagedState => ResolutionState::ManagedState,
-        ResolutionIntent::LoadEligibility => {
-            ResolutionState::LoadEligibility(load_eligibility.expect("resolved above"))
-        }
+        ResolutionIntent::LoadEligibility => ResolutionState::LoadEligibility(
+            enabled_declarations
+                .iter()
+                .map(|declaration| {
+                    evaluate_condition(
+                        &declaration.load_condition,
+                        declaration,
+                        "cond",
+                        working_dir,
+                        process,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?,
+        ),
         ResolutionIntent::RuntimeConfiguration => {
-            ResolutionState::RuntimeConfiguration(load_eligibility.expect("resolved above"))
+            for declaration in &mut enabled_declarations {
+                declaration.spec.runtime = if evaluate_condition(
+                    &declaration.load_condition,
+                    declaration,
+                    "cond",
+                    working_dir,
+                    process,
+                )? {
+                    PluginRuntimeConfiguration::Selected(PluginRuntime::default())
+                } else {
+                    PluginRuntimeConfiguration::Unresolved
+                };
+            }
+            for declaration in &mut enabled_declarations {
+                if matches!(declaration.spec.runtime, PluginRuntimeConfiguration::Selected(_)) {
+                    let projection =
+                        project_runtime_configuration(declaration, working_dir, process)?;
+                    declaration.spec.runtime = PluginRuntimeConfiguration::Selected(projection);
+                }
+            }
+            ResolutionState::RuntimeConfiguration
         }
     };
+    let plugins = enabled_declarations.into_iter().map(|declaration| declaration.spec).collect();
     Ok(ResolvedPlugins { plugins, state })
 }
 

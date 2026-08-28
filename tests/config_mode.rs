@@ -428,8 +428,11 @@ plugin "{}" local=#true cond=#false
 
     assert_eq!(loaded.config.plugins.len(), 5);
     assert_eq!(
-        loaded.config.load_eligibility().map(|eligibility| eligibility.values()),
-        Some(&[true, false, true, false, false][..])
+        loaded
+            .config
+            .load_eligibility()
+            .map(|eligibility| eligibility.values().collect::<Vec<_>>()),
+        Some(vec![true, false, true, false, false])
     );
     assert!(loaded.config.runtime_configuration().is_none());
     assert!(
@@ -662,8 +665,11 @@ fn mixed_mode_preserves_tpm_order_and_applies_kdl_load_conditions_after_merge() 
         loaded.config.plugins.iter().filter_map(|plugin| plugin.remote_id()).collect();
     assert_eq!(ids, ["github.com/tmux-plugins/tmux-sensible", "github.com/tmux-plugins/tmux-yank"]);
     assert_eq!(
-        loaded.config.load_eligibility().map(|eligibility| eligibility.values()),
-        Some(&[false, true][..])
+        loaded
+            .config
+            .load_eligibility()
+            .map(|eligibility| eligibility.values().collect::<Vec<_>>()),
+        Some(vec![false, true])
     );
 }
 

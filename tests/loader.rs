@@ -396,6 +396,9 @@ plugin "user/load-last" opt-prefix="last_" { opt "mode" "yes" }
 "#,
     );
 
+    let load_eligibility: Vec<_> = config.load_eligibility().unwrap().values().collect();
+    assert_eq!(load_eligibility, [true, false, true]);
+
     let plan = build_load_plan(config.runtime_configuration().unwrap(), &plugin_root);
 
     assert!(matches!(config.plugins[0].runtime, RuntimeConfiguration::Selected(_)));

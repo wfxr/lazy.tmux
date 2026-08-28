@@ -44,39 +44,38 @@ pub struct ResolvedConfig {
 
 impl ResolvedConfig {
     fn new(config: Config, state: ResolutionState) -> Self {
-        if let Some(values) = state.load_eligibility() {
-            debug_assert_eq!(values.len(), config.plugins.len());
-        }
         match &state {
-            ResolutionState::ManagedState | ResolutionState::LoadEligibility(_) => {
+            ResolutionState::ManagedState => {
                 debug_assert!(config.plugins.iter().all(|plugin| {
                     matches!(plugin.runtime, PluginRuntimeConfiguration::Unresolved)
                 }));
             }
-            ResolutionState::RuntimeConfiguration(values) => {
-                debug_assert!(config.plugins.iter().zip(values).all(|(plugin, eligible)| {
-                    *eligible == matches!(plugin.runtime, PluginRuntimeConfiguration::Selected(_))
+            ResolutionState::LoadEligibility(values) => {
+                debug_assert_eq!(values.len(), config.plugins.len());
+                debug_assert!(config.plugins.iter().all(|plugin| {
+                    matches!(plugin.runtime, PluginRuntimeConfiguration::Unresolved)
                 }));
             }
+            ResolutionState::RuntimeConfiguration => {}
         }
         Self { config, state }
     }
 
     /// Borrow Load Eligibility tied to this snapshot's ordered plugins.
     pub fn load_eligibility(&self) -> Option<LoadEligibility<'_>> {
-        self.state
-            .load_eligibility()
-            .map(|values| LoadEligibility { plugins: &self.config.plugins, values })
+        let source = match &self.state {
+            ResolutionState::ManagedState => return None,
+            ResolutionState::LoadEligibility(values) => LoadEligibilitySource::Explicit(values),
+            ResolutionState::RuntimeConfiguration => LoadEligibilitySource::RuntimeConfiguration,
+        };
+        Some(LoadEligibility { plugins: &self.config.plugins, source })
     }
 
     /// Borrow the runtime-ready plugin selection for an Init Session.
     pub fn runtime_configuration(&self) -> Option<RuntimeConfigurationSnapshot<'_>> {
         match &self.state {
-            ResolutionState::RuntimeConfiguration(load_eligibility) => {
-                Some(RuntimeConfigurationSnapshot {
-                    plugins: &self.config.plugins,
-                    load_eligibility,
-                })
+            ResolutionState::RuntimeConfiguration => {
+                Some(RuntimeConfigurationSnapshot { plugins: &self.config.plugins })
             }
             ResolutionState::ManagedState | ResolutionState::LoadEligibility(_) => None,
         }
@@ -92,16 +91,7 @@ impl ResolvedConfig {
 pub(super) enum ResolutionState {
     ManagedState,
     LoadEligibility(Vec<bool>),
-    RuntimeConfiguration(Vec<bool>),
-}
-
-impl ResolutionState {
-    fn load_eligibility(&self) -> Option<&[bool]> {
-        match self {
-            Self::ManagedState => None,
-            Self::LoadEligibility(values) | Self::RuntimeConfiguration(values) => Some(values),
-        }
-    }
+    RuntimeConfiguration,
 }
 
 impl Deref for ResolvedConfig {
@@ -116,18 +106,40 @@ impl Deref for ResolvedConfig {
 #[derive(Debug, Clone, Copy)]
 pub struct LoadEligibility<'snapshot> {
     plugins: &'snapshot [PluginSpec],
-    values: &'snapshot [bool],
+    source: LoadEligibilitySource<'snapshot>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LoadEligibilitySource<'snapshot> {
+    Explicit(&'snapshot [bool]),
+    RuntimeConfiguration,
+}
+
+impl LoadEligibilitySource<'_> {
+    fn value(self, index: usize, plugin: &PluginSpec) -> bool {
+        match self {
+            Self::Explicit(values) => values[index],
+            Self::RuntimeConfiguration => {
+                matches!(plugin.runtime, PluginRuntimeConfiguration::Selected(_))
+            }
+        }
+    }
 }
 
 impl<'snapshot> LoadEligibility<'snapshot> {
     /// Iterate over the snapshot's plugins and their Load Eligibility together.
-    pub fn plugins(self) -> impl Iterator<Item = (&'snapshot PluginSpec, bool)> {
-        self.plugins.iter().zip(self.values.iter().copied())
+    pub fn plugins(
+        self,
+    ) -> impl ExactSizeIterator<Item = (&'snapshot PluginSpec, bool)> + 'snapshot {
+        self.plugins
+            .iter()
+            .enumerate()
+            .map(move |(index, plugin)| (plugin, self.source.value(index, plugin)))
     }
 
-    /// Borrow the ordered eligibility values for diagnostics and assertions.
-    pub fn values(self) -> &'snapshot [bool] {
-        self.values
+    /// Iterate over the ordered eligibility values for diagnostics and assertions.
+    pub fn values(self) -> impl ExactSizeIterator<Item = bool> + 'snapshot {
+        self.plugins().map(|(_, eligible)| eligible)
     }
 }
 
@@ -135,7 +147,6 @@ impl<'snapshot> LoadEligibility<'snapshot> {
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeConfigurationSnapshot<'snapshot> {
     plugins: &'snapshot [PluginSpec],
-    load_eligibility: &'snapshot [bool],
 }
 
 impl<'snapshot> RuntimeConfigurationSnapshot<'snapshot> {
@@ -143,16 +154,9 @@ impl<'snapshot> RuntimeConfigurationSnapshot<'snapshot> {
     pub fn plugins(
         self,
     ) -> impl Iterator<Item = (&'snapshot PluginSpec, &'snapshot PluginRuntime)> {
-        self.plugins.iter().zip(self.load_eligibility).filter_map(|(plugin, eligible)| {
-            if !eligible {
-                return None;
-            }
-            match &plugin.runtime {
-                PluginRuntimeConfiguration::Selected(runtime) => Some((plugin, runtime)),
-                PluginRuntimeConfiguration::Unresolved => {
-                    unreachable!("runtime-ready snapshots select every load-eligible plugin")
-                }
-            }
+        self.plugins.iter().filter_map(|plugin| match &plugin.runtime {
+            PluginRuntimeConfiguration::Selected(runtime) => Some((plugin, runtime)),
+            PluginRuntimeConfiguration::Unresolved => None,
         })
     }
 }
