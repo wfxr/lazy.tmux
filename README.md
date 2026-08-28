@@ -422,10 +422,10 @@ disabled, `sync` drops its lock entry and a later `clean` may remove its managed
 checkout.
 
 `cond=#false` keeps the plugin managed, installed, built, updated, and locked.
-During `init`, tmup skips its environment operations, options, and `*.tmux`
-scripts. Installation or build failures still make `init` return a non-zero
-status. Changing `cond` from true to false does not undo effects from an earlier
-load; restart the tmux server when you need to clear those effects.
+During `init`, tmup skips its environment operations, options, `*.tmux` scripts,
+and bindings. Installation or build failures still make `init` return a
+non-zero status. Changing `cond` from true to false does not undo effects from
+an earlier load; restart the tmux server when you need to clear those effects.
 
 String predicates run with `/bin/sh -c`, inherit the tmup process environment,
 use the configuration directory as their working directory, and time out after

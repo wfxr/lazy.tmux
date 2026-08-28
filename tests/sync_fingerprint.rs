@@ -48,6 +48,7 @@ plugin "https://github.com/user/beta.git"
 
 #[test]
 fn runtime_declarations_do_not_affect_plugin_or_config_fingerprints() {
+    let without_runtime_declarations = parse_config(r#"plugin "user/repo""#).unwrap();
     let first = parse_config(
         r##"
 plugin "user/repo" {
@@ -76,9 +77,14 @@ plugin "user/repo" {
     .unwrap();
 
     assert_eq!(
+        remote_plugin_config_hash(&without_runtime_declarations.plugins[0]),
+        remote_plugin_config_hash(&first.plugins[0])
+    );
+    assert_eq!(
         remote_plugin_config_hash(&first.plugins[0]),
         remote_plugin_config_hash(&second.plugins[0])
     );
+    assert_eq!(config_fingerprint(&without_runtime_declarations), config_fingerprint(&first));
     assert_eq!(config_fingerprint(&first), config_fingerprint(&second));
 }
 

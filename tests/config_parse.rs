@@ -1,5 +1,8 @@
+mod utils;
+
 use tmup::config::parse_config;
 use tmup::model::{EnvironmentOperation, KeyBinding};
+use utils::{MALFORMED_BINDING_NODES, MALFORMED_ENVIRONMENT_NODES};
 
 #[test]
 fn parses_remote_and_local_plugins() {
@@ -135,90 +138,7 @@ plugin "/opt/plugins/local" local=#true {
 
 #[test]
 fn rejects_malformed_recognized_binding_nodes() {
-    let cases = [
-        (r#"plugin "user/repo" { bind { shell "true" } }"#, "exactly 1 key string argument"),
-        (
-            r#"plugin "user/repo" { bind "x" "extra" { shell "true" } }"#,
-            "exactly 1 key string argument",
-        ),
-        (r#"plugin "user/repo" { bind 42 { shell "true" } }"#, "key must be a string"),
-        (r#"plugin "user/repo" { bind "" { shell "true" } }"#, "key must not be empty"),
-        (
-            r#"plugin "user/repo" { bind "x" future=#true { shell "true" } }"#,
-            "bind must not have properties",
-        ),
-        (
-            r#"plugin "user/repo" { bind (future)"x" { shell "true" } }"#,
-            "bind does not support KDL type annotations",
-        ),
-        (r#"plugin "user/repo" { bind "x" }"#, "bind requires a child block"),
-        (r#"plugin "user/repo" { bind "x" { options; shell "true" } }"#, "at least 1"),
-        (
-            r#"plugin "user/repo" { bind "x" { options ""; shell "true" } }"#,
-            "option strings must not be empty",
-        ),
-        (
-            r#"plugin "user/repo" { bind "x" { options "-n" 42; shell "true" } }"#,
-            "options must be strings",
-        ),
-        (
-            r#"plugin "user/repo" { bind "x" { options "-n"; options "-r"; shell "true" } }"#,
-            "options child may only be specified once",
-        ),
-        (
-            r#"plugin "user/repo" { bind "x" { options "-n" future=#true; shell "true" } }"#,
-            "options must not have properties",
-        ),
-        (
-            r#"plugin "user/repo" { bind "x" { options (future)"-n"; shell "true" } }"#,
-            "options does not support KDL type annotations",
-        ),
-        (
-            "plugin \"user/repo\" { bind \"x\" { options \"-n\" { future #true }; shell \"true\" } }",
-            "options must not have child nodes",
-        ),
-        (r#"plugin "user/repo" { bind "x" { options "-n" } }"#, "exactly one shell child"),
-        (
-            r#"plugin "user/repo" { bind "x" { shell "true"; shell "false" } }"#,
-            "exactly one shell child",
-        ),
-        (
-            r#"plugin "user/repo" { bind "x" { shell "true" "extra" } }"#,
-            "shell requires exactly 1 command string",
-        ),
-        (r#"plugin "user/repo" { bind "x" { shell 42 } }"#, "shell command must be a string"),
-        (r#"plugin "user/repo" { bind "x" { shell "   " } }"#, "empty or whitespace-only"),
-        (
-            r#"plugin "user/repo" { bind "x" { shell "true" future=#true } }"#,
-            "unknown shell property",
-        ),
-        (
-            r#"plugin "user/repo" { bind "x" { shell "true" background="yes" } }"#,
-            "background must be a bool",
-        ),
-        (
-            r#"plugin "user/repo" { bind "x" { shell "true" background=#true background=#false } }"#,
-            "background may only be specified once",
-        ),
-        (
-            r#"plugin "user/repo" { bind "x" { shell "true" background=(future)#true } }"#,
-            "background does not support KDL type annotations",
-        ),
-        (
-            r#"plugin "user/repo" { bind "x" { shell (future)"true" } }"#,
-            "shell does not support KDL type annotations",
-        ),
-        (
-            "plugin \"user/repo\" { bind \"x\" { shell \"true\" { future #true } } }",
-            "shell must not have child nodes",
-        ),
-        (
-            r#"plugin "user/repo" { bind "x" { future "value"; shell "true" } }"#,
-            "unknown bind child",
-        ),
-    ];
-
-    for (input, expected) in cases {
+    for &(input, expected) in MALFORMED_BINDING_NODES {
         let error = parse_config(input).unwrap_err();
         assert!(error.to_string().contains(expected), "input={input:?}, error={error:#}");
     }
@@ -226,27 +146,7 @@ fn rejects_malformed_recognized_binding_nodes() {
 
 #[test]
 fn rejects_malformed_recognized_environment_nodes() {
-    let cases = [
-        (r#"plugin "user/repo" { env "NAME" }"#, "exactly 2 string arguments"),
-        (r#"plugin "user/repo" { env "NAME" "value" "extra" }"#, "exactly 2 string arguments"),
-        (r#"plugin "user/repo" { env 42 "value" }"#, "arguments must be strings"),
-        (r#"plugin "user/repo" { env "NAME" #true }"#, "arguments must be strings"),
-        (r#"plugin "user/repo" { env "" "value" }"#, "env name must not be empty"),
-        (r#"plugin "user/repo" { unset-env }"#, "exactly 1 string argument"),
-        (r#"plugin "user/repo" { unset-env "" }"#, "unset-env name must not be empty"),
-        (r#"plugin "user/repo" { unset-env 42 }"#, "arguments must be strings"),
-        (r#"plugin "user/repo" { env "NAME" "value" future=#true }"#, "must not have properties"),
-        (
-            r#"plugin "user/repo" { env (future)"NAME" "value" }"#,
-            "does not support KDL type annotations",
-        ),
-        (
-            "plugin \"user/repo\" { unset-env \"NAME\" { future #true } }",
-            "must not have child nodes",
-        ),
-    ];
-
-    for (input, expected) in cases {
+    for &(input, expected) in MALFORMED_ENVIRONMENT_NODES {
         let error = parse_config(input).unwrap_err();
         assert!(error.to_string().contains(expected), "input={input:?}, error={error:#}");
     }

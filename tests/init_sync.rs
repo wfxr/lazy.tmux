@@ -768,6 +768,89 @@ plugin "{}" local=#true opt-prefix="neighbor_" {{
 
 #[cfg(unix)]
 #[test]
+fn public_init_omits_remote_runtime_configuration_after_preparation_failure() {
+    let dir = tempdir().unwrap();
+    make_remote_repo(dir.path());
+    let gitconfig = write_git_rewrite_config(dir.path());
+    let neighbor = dir.path().join("neighbor");
+    std::fs::create_dir_all(&neighbor).unwrap();
+    std::fs::write(neighbor.join("neighbor.tmux"), "#!/bin/sh\n").unwrap();
+    let config_path = dir.path().join("tmup.kdl");
+    std::fs::write(
+        &config_path,
+        r#"
+options { auto-install #true }
+plugin "https://example.com/test/plugin.git"
+"#,
+    )
+    .unwrap();
+    let tmux_log = dir.path().join("tmux.log");
+    let fake_tmux_dir = write_recording_tmux(dir.path(), &tmux_log);
+    let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
+
+    let initial = public_init_command(&config_path, dir.path(), &path)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .output()
+        .unwrap();
+    assert!(initial.status.success(), "stderr:\n{}", String::from_utf8_lossy(&initial.stderr));
+    let lock_path = dir.path().join("tmup.lock");
+    let original_lock = std::fs::read_to_string(&lock_path).unwrap();
+    let installed = dir.path().join("data/tmup/plugins/example.com/test/plugin");
+    let original_commit = git(&["rev-parse", "HEAD"], &installed);
+
+    std::fs::write(&tmux_log, "").unwrap();
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+options {{ auto-install #true }}
+plugin "https://example.com/test/plugin.git" branch="missing" opt-prefix="remote_" {{
+    env "REMOTE_ENV" "must-not-load"
+    opt "mode" "must-not-load"
+    bind "REMOTE-bind" {{ shell "true" }}
+}}
+plugin "{}" local=#true opt-prefix="neighbor_" {{
+    env "NEIGHBOR_ENV" "loaded"
+    opt "mode" "loaded"
+    bind "NEIGHBOR-bind" {{ shell "true" }}
+}}
+"#,
+            neighbor.display(),
+        ),
+    )
+    .unwrap();
+
+    let output = public_init_command(&config_path, dir.path(), &path)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("example.com/test/plugin"), "stderr:\n{stderr}");
+    let log = std::fs::read_to_string(&tmux_log).unwrap();
+    for failed_plugin_action in
+        ["REMOTE_ENV", "@remote_mode", "example.com/test/plugin/init.tmux", "REMOTE-bind"]
+    {
+        assert!(
+            !log.contains(failed_plugin_action),
+            "preparation-failed plugin action {failed_plugin_action} must be omitted:\n{log}"
+        );
+    }
+    for neighbor_action in ["NEIGHBOR_ENV", "@neighbor_mode", "neighbor.tmux", "NEIGHBOR-bind"] {
+        assert!(
+            log.contains(neighbor_action),
+            "unaffected plugin action {neighbor_action} must continue:\n{log}"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&lock_path).unwrap(), original_lock);
+    assert_eq!(git(&["rev-parse", "HEAD"], &installed), original_commit);
+}
+
+#[cfg(unix)]
+#[test]
 fn public_init_aggregates_plugin_failures_but_keeps_global_setup_failure_operation_level() {
     let dir = tempdir().unwrap();
     let plugin_a = dir.path().join("plugin-a");
@@ -835,36 +918,35 @@ plugin "{}" local=#true {{
 
 #[cfg(unix)]
 #[test]
-fn public_init_rejects_malformed_bindings_before_tmux_loading_or_state_mutation() {
+fn public_init_rejects_malformed_integration_nodes_before_tmux_loading_or_state_mutation() {
     let dir = tempdir().unwrap();
-    let config_path = dir.path().join("tmup.kdl");
-    std::fs::write(
-        &config_path,
-        r#"
-options { auto-install #true }
-plugin "user/repo" {
-    bind "x" {
-        shell "true" background="yes"
+    for (index, &(config, expected)) in
+        MALFORMED_ENVIRONMENT_NODES.iter().chain(MALFORMED_BINDING_NODES).enumerate()
+    {
+        let case_root = dir.path().join(format!("case-{index}"));
+        std::fs::create_dir_all(&case_root).unwrap();
+        let config_path = case_root.join("tmup.kdl");
+        std::fs::write(&config_path, config).unwrap();
+        let tmux_log = case_root.join("tmux.log");
+        let fake_tmux_dir = write_recording_tmux(&case_root, &tmux_log);
+        let path =
+            format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
+
+        let output = public_init_command(&config_path, &case_root, &path).output().unwrap();
+
+        assert!(!output.status.success(), "config={config:?} must fail");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "config={config:?} stderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!tmux_log.exists(), "config={config:?} must fail before tmux loading");
+        assert!(
+            !case_root.join("data/tmup/plugins").exists(),
+            "config={config:?} mutated plugin state"
+        );
+        assert!(!case_root.join("state/tmup").exists(), "config={config:?} mutated runtime state");
     }
-}
-"#,
-    )
-    .unwrap();
-    let tmux_log = dir.path().join("tmux.log");
-    let fake_tmux_dir = write_recording_tmux(dir.path(), &tmux_log);
-    let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
-
-    let output = public_init_command(&config_path, dir.path(), &path).output().unwrap();
-
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("shell background must be a bool"),
-        "stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(!tmux_log.exists(), "invalid bindings must fail before tmux loading");
-    assert!(!dir.path().join("data/tmup/plugins").exists());
-    assert!(!dir.path().join("state/tmup").exists());
 }
 
 #[cfg(unix)]
