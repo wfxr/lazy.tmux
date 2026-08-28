@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use crate::config_mode::{LoadEligibility, RuntimeSetup};
-use crate::model::{EnvironmentOperation, PluginSource, PluginSpec};
+use crate::config_mode::RuntimeConfigurationSnapshot;
+use crate::model::{EnvironmentOperation, PluginSource, PluginSpec, SetupOperation};
 use crate::tmux::TmuxCommand;
 
 /// One tmux command attributed to the plugin that declared or supplied it.
@@ -33,7 +33,7 @@ impl LoadPlan {
 }
 
 /// Build the full load plan: set the manager path, configure plugins, run `*.tmux` files, then bind keys.
-pub fn build_load_plan(load_eligibility: LoadEligibility<'_>, plugin_root: &Path) -> LoadPlan {
+pub fn build_load_plan(runtime: RuntimeConfigurationSnapshot<'_>, plugin_root: &Path) -> LoadPlan {
     // 1. Set TMUX_PLUGIN_MANAGER_PATH with trailing slash
     let root_str = format!("{}/", plugin_root.display());
     let global_setup =
@@ -41,27 +41,24 @@ pub fn build_load_plan(load_eligibility: LoadEligibility<'_>, plugin_root: &Path
     let mut plugin_commands = Vec::new();
 
     // 2. Configure each eligible plugin in declaration order.
-    for (spec, load_eligible, runtime_setup) in load_eligibility.plugins_with_runtime_setup() {
-        if !load_eligible {
-            continue;
-        }
-        for declaration in runtime_setup {
+    for (spec, plugin_runtime) in runtime.plugins() {
+        for declaration in &plugin_runtime.setup {
             match declaration {
-                RuntimeSetup::Environment(EnvironmentOperation::Set { name, value }) => {
+                SetupOperation::Environment(EnvironmentOperation::Set { name, value }) => {
                     push_plugin_command(
                         &mut plugin_commands,
                         spec,
                         TmuxCommand::SetEnvironment { key: name.clone(), value: value.clone() },
                     );
                 }
-                RuntimeSetup::Environment(EnvironmentOperation::Unset { name }) => {
+                SetupOperation::Environment(EnvironmentOperation::Unset { name }) => {
                     push_plugin_command(
                         &mut plugin_commands,
                         spec,
                         TmuxCommand::UnsetEnvironment { key: name.clone() },
                     );
                 }
-                RuntimeSetup::Option { key, value } => {
+                SetupOperation::Option { key, value } => {
                     push_plugin_command(
                         &mut plugin_commands,
                         spec,
@@ -76,10 +73,7 @@ pub fn build_load_plan(load_eligibility: LoadEligibility<'_>, plugin_root: &Path
     }
 
     // 3. Load scripts only after every eligible plugin's environment and options are configured.
-    for (spec, load_eligible) in load_eligibility.plugins() {
-        if !load_eligible {
-            continue;
-        }
+    for (spec, _) in runtime.plugins() {
         let plugin_dir = resolved_plugin_dir(spec, plugin_root);
 
         // Find and sort *.tmux files
@@ -90,12 +84,9 @@ pub fn build_load_plan(load_eligibility: LoadEligibility<'_>, plugin_root: &Path
     }
 
     // 4. Register explicit bindings after all plugin scripts so declarations can override defaults.
-    for (spec, load_eligible) in load_eligibility.plugins() {
-        if !load_eligible {
-            continue;
-        }
+    for (spec, plugin_runtime) in runtime.plugins() {
         let plugin_dir = resolved_plugin_dir(spec, plugin_root);
-        for binding in &spec.bindings {
+        for binding in &plugin_runtime.bindings {
             push_plugin_command(
                 &mut plugin_commands,
                 spec,

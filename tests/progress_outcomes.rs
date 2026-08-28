@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use tempfile::tempdir;
 use tmup::lockfile::{LockEntry, LockFile, TrackingRecord};
-use tmup::model::{Config, Options, PluginSource, PluginSpec, Tracking};
+use tmup::model::{Config, Options, PluginSource, PluginSpec, RuntimeConfiguration, Tracking};
 use tmup::progress::{NullReporter, PluginOutcome, ProgressEvent, ProgressReporter, SkipReason};
 use tmup::state::{self, Paths, build_command_hash};
 use tmup::sync::{self, SyncMode, SyncPolicy};
@@ -22,9 +22,7 @@ fn make_plugin(id: &str, clone_url: &str, tracking: Tracking, build: Option<&str
         opt_prefix: String::new(),
         tracking,
         build: build.map(String::from),
-        opts: vec![],
-        environment: vec![],
-        bindings: vec![],
+        runtime: RuntimeConfiguration::Unresolved,
     }
 }
 

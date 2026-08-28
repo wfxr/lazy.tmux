@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use tempfile::tempdir;
 use tmup::lockfile::{LockEntry, LockFile, TrackingRecord};
-use tmup::model::{Config, Options, PluginSource, PluginSpec, Tracking};
+use tmup::model::{Config, Options, PluginSource, PluginSpec, RuntimeConfiguration, Tracking};
 use tmup::plugin;
 use tmup::progress::{NullReporter, PluginOutcome, PluginStage, ProgressEvent, ProgressReporter};
 use tmup::state::Paths;
@@ -32,9 +32,7 @@ fn make_config_with_tracking(clone_url: &str, tracking: Tracking, build: Option<
             opt_prefix: String::new(),
             tracking,
             build: build.map(String::from),
-            opts: vec![],
-            environment: vec![],
-            bindings: vec![],
+            runtime: RuntimeConfiguration::Unresolved,
         }],
     }
 }

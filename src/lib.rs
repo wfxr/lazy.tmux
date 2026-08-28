@@ -2,8 +2,7 @@
 
 //! Modern tmux plugin manager.
 
-/// KDL configuration file parsing.
-pub mod config;
+mod config;
 /// Config-mode resolution and multi-source loading.
 pub mod config_mode;
 /// TPM-style tmux config scanning and plugin extraction.

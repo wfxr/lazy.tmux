@@ -858,11 +858,11 @@ async fn execute_core(
     .await?;
 
     reporter.report(ProgressEvent::OperationStage { stage: OperationStage::LoadingTmux });
-    let load_eligibility = loaded
+    let runtime_configuration = loaded
         .config
-        .load_eligibility()
-        .context("Init Session configuration did not resolve Load Eligibility")?;
-    let load_plan = loader::build_load_plan(load_eligibility, &loaded.paths.plugin_root);
+        .runtime_configuration()
+        .context("Init Session configuration did not resolve Runtime Configuration")?;
+    let load_plan = loader::build_load_plan(runtime_configuration, &loaded.paths.plugin_root);
     let runtime_failures =
         tmux.execute_load_plan(&load_plan, sync_outcome.load_excluded_plugin_ids())?;
     let mut plugin_failures = sync_outcome.plugin_failures;

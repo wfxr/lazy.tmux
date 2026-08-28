@@ -3,6 +3,7 @@ use tmup::config_mode::{
     ConfigMode, ResolutionIntent, ResolvedConfig, load_from_sources_with_intent,
 };
 use tmup::loader::{PluginLoadCommand, build_load_plan};
+use tmup::model::RuntimeConfiguration;
 use tmup::tmux::TmuxCommand;
 
 fn resolve_config(root: &std::path::Path, input: &str) -> ResolvedConfig {
@@ -12,7 +13,7 @@ fn resolve_config(root: &std::path::Path, input: &str) -> ResolvedConfig {
         ConfigMode::Pure,
         Some(&path),
         None,
-        ResolutionIntent::LoadEligibility,
+        ResolutionIntent::RuntimeConfiguration,
     )
     .unwrap()
     .config
@@ -38,7 +39,7 @@ plugin "user/plugin-a" opt-prefix="pa_" {
     "##,
     );
 
-    let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
+    let plan = build_load_plan(config.runtime_configuration().unwrap(), &plugin_root);
     let commands: Vec<_> = plan.iter().collect();
 
     // 1. First command should be SetEnvironment
@@ -89,7 +90,7 @@ plugin "user/plugin-b"
     "#,
     );
 
-    let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
+    let plan = build_load_plan(config.runtime_configuration().unwrap(), &plugin_root);
 
     // After env setup, plugin-a runs before plugin-b
     let run_shells: Vec<_> = plan
@@ -123,7 +124,7 @@ plugin "user/plugin-b" { env "PLUGIN_B" "yes" }
 "#,
     );
 
-    let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
+    let plan = build_load_plan(config.runtime_configuration().unwrap(), &plugin_root);
 
     assert!(matches!(
         plan.plugin_commands.first(),
@@ -183,7 +184,7 @@ plugin "user/plugin-b" opt-prefix="b_" {
 "##,
     );
 
-    let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
+    let plan = build_load_plan(config.runtime_configuration().unwrap(), &plugin_root);
     let commands: Vec<_> = plan.iter().cloned().collect();
 
     assert_eq!(
@@ -269,7 +270,7 @@ plugin "user/plugin" opt-prefix="p_" {
     .unwrap()
     .config;
 
-    let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
+    let plan = build_load_plan(config.runtime_configuration().unwrap(), &plugin_root);
     let commands: Vec<_> = plan.iter().cloned().collect();
 
     assert_eq!(
@@ -328,7 +329,7 @@ fn loader_handles_missing_plugin_dir() {
     // Don't create any plugin directories
 
     let config = resolve_config(dir.path(), r#"plugin "user/missing""#);
-    let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
+    let plan = build_load_plan(config.runtime_configuration().unwrap(), &plugin_root);
 
     assert!(plan.plugin_commands.is_empty());
     assert!(matches!(plan.global_setup, TmuxCommand::SetEnvironment { .. }));
@@ -350,7 +351,7 @@ plugin "catppuccin/tmux" opt-prefix="catppuccin_" {
     "##,
     );
 
-    let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
+    let plan = build_load_plan(config.runtime_configuration().unwrap(), &plugin_root);
 
     let opts: Vec<_> = plan
         .iter()
@@ -395,7 +396,11 @@ plugin "user/load-last" opt-prefix="last_" { opt "mode" "yes" }
 "#,
     );
 
-    let plan = build_load_plan(config.load_eligibility().unwrap(), &plugin_root);
+    let plan = build_load_plan(config.runtime_configuration().unwrap(), &plugin_root);
+
+    assert!(matches!(config.plugins[0].runtime, RuntimeConfiguration::Selected(_)));
+    assert!(matches!(config.plugins[1].runtime, RuntimeConfiguration::Unresolved));
+    assert!(matches!(config.plugins[2].runtime, RuntimeConfiguration::Selected(_)));
 
     assert!(matches!(plan.global_setup, TmuxCommand::SetEnvironment { .. }));
     assert!(!plan.iter().any(|command| match command {

@@ -88,6 +88,39 @@ pub struct KeyBinding {
     pub background: bool,
 }
 
+/// One ordered plugin setup operation applied before plugin scripts load.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetupOperation {
+    /// Set one tmux global option after applying the plugin's option prefix.
+    Option {
+        /// Option key without the plugin's configured prefix.
+        key: String,
+        /// Literal option value.
+        value: String,
+    },
+    /// Apply one tmux global environment operation.
+    Environment(EnvironmentOperation),
+}
+
+/// Runtime declarations selected for one plugin in source order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PluginRuntime {
+    /// Ordered environment and option setup operations.
+    pub setup: Vec<SetupOperation>,
+    /// Ordered key bindings registered after plugin scripts load.
+    pub bindings: Vec<KeyBinding>,
+}
+
+/// Runtime selection state for one resolved plugin specification.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RuntimeConfiguration {
+    /// Runtime declarations were not selected for this resolution intent.
+    #[default]
+    Unresolved,
+    /// Runtime declarations were selected for this Init Session snapshot.
+    Selected(PluginRuntime),
+}
+
 /// Full specification for a single plugin entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginSpec {
@@ -101,12 +134,8 @@ pub struct PluginSpec {
     pub tracking: Tracking,
     /// Optional shell command to run after installing or updating.
     pub build: Option<String>,
-    /// Extra key-value options passed to the plugin.
-    pub opts: Vec<(String, String)>,
-    /// Ordered global tmux environment operations applied while loading the plugin.
-    pub environment: Vec<EnvironmentOperation>,
-    /// Ordered key bindings registered after plugin scripts load.
-    pub bindings: Vec<KeyBinding>,
+    /// Runtime declarations selected for this resolution intent.
+    pub runtime: RuntimeConfiguration,
 }
 
 impl Config {
@@ -130,7 +159,6 @@ impl PluginSpec {
         opt_prefix: String,
         tracking: Tracking,
         build: Option<String>,
-        opts: Vec<(String, String)>,
     ) -> Result<Self> {
         let (id, clone_url) = normalize_remote_source(source)?;
         let name =
@@ -141,26 +169,21 @@ impl PluginSpec {
             opt_prefix,
             tracking,
             build,
-            opts,
-            environment: Vec::new(),
-            bindings: Vec::new(),
+            runtime: RuntimeConfiguration::Unresolved,
         })
     }
 
-    /// Build a remote plugin spec from a raw source string plus resolved metadata.
-    pub fn from_remote(
+    pub(crate) fn from_remote(
         raw: String,
         explicit_name: Option<String>,
         opt_prefix: String,
         tracking: Tracking,
         build: Option<String>,
-        opts: Vec<(String, String)>,
     ) -> Result<Self> {
-        Self::build_remote(raw.clone(), &raw, explicit_name, opt_prefix, tracking, build, opts)
+        Self::build_remote(raw.clone(), &raw, explicit_name, opt_prefix, tracking, build)
     }
 
-    /// Build a remote plugin spec from a raw TPM declaration.
-    pub fn from_tpm_remote(raw: &str) -> Result<Self> {
+    pub(crate) fn from_tpm_remote(raw: &str) -> Result<Self> {
         let (source, tracking) = match raw.rsplit_once('#') {
             Some((source, branch)) if !branch.is_empty() => {
                 (source.to_string(), Tracking::Branch(branch.to_string()))
@@ -168,15 +191,7 @@ impl PluginSpec {
             _ => (raw.to_string(), Tracking::DefaultBranch),
         };
 
-        Self::build_remote(
-            raw.to_string(),
-            &source,
-            None,
-            String::new(),
-            tracking,
-            None,
-            Vec::new(),
-        )
+        Self::build_remote(raw.to_string(), &source, None, String::new(), tracking, None)
     }
 
     /// Returns true if the plugin comes from a remote Git forge.

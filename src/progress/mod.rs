@@ -25,7 +25,7 @@ pub(crate) const ACTION_WIDTH: usize = 12;
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use crate::model::{PluginSource, PluginSpec, Tracking};
+    use crate::model::{PluginSource, PluginSpec, RuntimeConfiguration, Tracking};
 
     pub(crate) fn remote_plugin(raw: &str, id: &str, name: &str) -> PluginSpec {
         PluginSpec {
@@ -38,9 +38,7 @@ pub(crate) mod test_support {
             opt_prefix: "@plugin".to_string(),
             tracking: Tracking::DefaultBranch,
             build: None,
-            opts: Vec::new(),
-            environment: Vec::new(),
-            bindings: Vec::new(),
+            runtime: RuntimeConfiguration::Unresolved,
         }
     }
 }

@@ -10,7 +10,7 @@ use tempfile::tempdir;
 use tmup::lockfile::{
     LockEntry, LockFile, config_fingerprint, read_lockfile, remote_plugin_config_hash,
 };
-use tmup::model::{Config, Options, PluginSource, PluginSpec, Tracking};
+use tmup::model::{Config, Options, PluginSource, PluginSpec, RuntimeConfiguration, Tracking};
 use tmup::progress::NullReporter;
 use tmup::state::{Paths, build_command_hash};
 use tmup::sync;
@@ -187,9 +187,7 @@ fn make_plugin(clone_url: &str, tracking: Tracking, build: Option<&str>) -> Plug
         opt_prefix: String::new(),
         tracking,
         build: build.map(String::from),
-        opts: vec![],
-        environment: vec![],
-        bindings: vec![],
+        runtime: RuntimeConfiguration::Unresolved,
     }
 }
 

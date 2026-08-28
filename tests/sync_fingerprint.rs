@@ -1,12 +1,11 @@
 mod utils;
 
 use tempfile::tempdir;
-use tmup::config::parse_config;
 use tmup::config_mode::{
     ConfigMode, ResolutionIntent, load_from_sources, load_from_sources_with_intent,
 };
 use tmup::lockfile::{config_fingerprint, remote_plugin_config_hash};
-use utils::write_file;
+use utils::{load_native_config as parse_config, write_file};
 
 #[test]
 fn default_branch_hash_uses_declared_selector_semantics() {
@@ -205,8 +204,10 @@ plugin "user/repo" {
     )
     .unwrap();
 
-    assert_eq!(first.config.plugins[0].bindings[0].key, "first");
-    assert_eq!(second.config.plugins[0].bindings[0].key, "second");
+    let first_runtime = first.config.runtime_configuration().unwrap().plugins().next().unwrap().1;
+    let second_runtime = second.config.runtime_configuration().unwrap().plugins().next().unwrap().1;
+    assert_eq!(first_runtime.bindings[0].key, "first");
+    assert_eq!(second_runtime.bindings[0].key, "second");
     assert_eq!(
         remote_plugin_config_hash(&first.config.plugins[0]),
         remote_plugin_config_hash(&second.config.plugins[0]),

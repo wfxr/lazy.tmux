@@ -5,7 +5,8 @@ use anyhow::{Context, Result, bail, ensure};
 use kdl::{KdlDocument, KdlEntry};
 
 use crate::model::{
-    Config, EnvironmentOperation, KeyBinding, Options, PluginSource, PluginSpec, Tracking,
+    EnvironmentOperation, KeyBinding, Options, PluginSource, PluginSpec, RuntimeConfiguration,
+    Tracking,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,15 +43,6 @@ pub(crate) struct ParsedConfig {
     pub(crate) options: Options,
     pub(crate) plugins: Vec<PluginDeclaration>,
     pub(crate) warnings: Vec<String>,
-}
-
-/// Parse a KDL-formatted configuration string into a [`Config`].
-pub fn parse_config(input: &str) -> Result<Config> {
-    let parsed = parse_config_document(input)?;
-    Ok(Config {
-        options: parsed.options,
-        plugins: parsed.plugins.into_iter().map(|declaration| declaration.spec).collect(),
-    })
 }
 
 pub(crate) fn parse_config_document(input: &str) -> Result<ParsedConfig> {
@@ -175,56 +167,17 @@ fn parse_plugin(node: &kdl::KdlNode) -> Result<PluginDeclaration> {
         Tracking::DefaultBranch
     };
 
-    // Parse plugin runtime child nodes.
-    let mut opts = Vec::new();
-    let mut environment = Vec::new();
-    let mut bindings = Vec::new();
-    let mut runtime = Vec::new();
-    if let Some(children) = node.children() {
-        let nodes = children.nodes();
-        let mut index = 0;
-        while index < nodes.len() {
-            let child = &nodes[index];
-            match child.name().value() {
-                "opt" => {
-                    let (key, value) = parse_plugin_option(child, &raw)?;
-                    opts.push((key.clone(), value.clone()));
-                    runtime.push(RuntimeDeclaration::Option { key, value });
-                }
-                "env" | "unset-env" => {
-                    let operation = parse_environment_operation(child, &raw)?;
-                    environment.push(operation.clone());
-                    runtime.push(RuntimeDeclaration::Environment(operation));
-                }
-                "bind" => {
-                    let binding = parse_key_binding(child, &raw)?;
-                    bindings.push(binding.clone());
-                    runtime.push(RuntimeDeclaration::Binding(binding));
-                }
-                "if" => {
-                    let (branch, consumed_else) =
-                        parse_runtime_branch(child, nodes.get(index + 1), &raw)?;
-                    runtime.push(branch);
-                    if consumed_else {
-                        index += 1;
-                    }
-                }
-                "else" => bail!("plugin \"{raw}\": else must immediately follow an if node"),
-                "enabled" => {
-                    bail!(
-                        "plugin \"{raw}\": enabled child form is reserved; use enabled=#true, enabled=#false, or enabled=\"shell predicate\""
-                    );
-                }
-                "cond" => {
-                    bail!(
-                        "plugin \"{raw}\": cond child form is reserved; use cond=#true, cond=#false, or cond=\"shell predicate\""
-                    );
-                }
-                unknown => bail!("plugin \"{raw}\": unknown child \"{unknown}\""),
-            }
-            index += 1;
-        }
-    }
+    let runtime = node
+        .children()
+        .map(|children| {
+            parse_runtime_declaration_sequence(
+                children.nodes(),
+                &raw,
+                RuntimeDeclarationContext::Plugin,
+            )
+        })
+        .transpose()?
+        .unwrap_or_default();
 
     let source = if is_local {
         let expanded_path = expand_local_path(&raw)?;
@@ -248,16 +201,10 @@ fn parse_plugin(node: &kdl::KdlNode) -> Result<PluginDeclaration> {
             opt_prefix,
             tracking,
             build,
-            opts,
-            environment,
-            bindings,
+            runtime: RuntimeConfiguration::Unresolved,
         }
     } else {
-        let mut spec =
-            PluginSpec::from_remote(raw, explicit_name, opt_prefix, tracking, build, opts)?;
-        spec.environment = environment;
-        spec.bindings = bindings;
-        spec
+        PluginSpec::from_remote(raw, explicit_name, opt_prefix, tracking, build)?
     };
 
     Ok(PluginDeclaration { spec: source, enabled, load_condition, runtime })
@@ -269,7 +216,7 @@ fn parse_runtime_branch(
     plugin: &str,
 ) -> Result<(RuntimeDeclaration, bool)> {
     let condition = parse_runtime_branch_condition(if_node, plugin)?;
-    let then_declarations = parse_runtime_branch_body(if_node, plugin)?;
+    let then_declarations = parse_runtime_branch_children(if_node, plugin)?;
     let else_node = next_node.filter(|node| node.name().value() == "else");
     let else_declarations = else_node
         .map(|node| {
@@ -281,7 +228,7 @@ fn parse_runtime_branch(
                 node.entries().is_empty(),
                 "plugin \"{plugin}\": else must not have arguments or properties"
             );
-            parse_runtime_branch_body(node, plugin)
+            parse_runtime_branch_children(node, plugin)
         })
         .transpose()?
         .unwrap_or_default();
@@ -313,18 +260,34 @@ fn parse_runtime_branch_condition(node: &kdl::KdlNode, plugin: &str) -> Result<C
     bail!("plugin \"{plugin}\": if condition must be a bool or shell predicate string")
 }
 
-fn parse_runtime_branch_body(node: &kdl::KdlNode, plugin: &str) -> Result<Vec<RuntimeDeclaration>> {
+fn parse_runtime_branch_children(
+    node: &kdl::KdlNode,
+    plugin: &str,
+) -> Result<Vec<RuntimeDeclaration>> {
     let children = node
         .children()
         .with_context(|| format!("plugin \"{plugin}\": {} requires a child block", node.name()))?;
-    let nodes = children.nodes();
+    parse_runtime_declaration_sequence(children.nodes(), plugin, RuntimeDeclarationContext::Branch)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeDeclarationContext {
+    Plugin,
+    Branch,
+}
+
+fn parse_runtime_declaration_sequence(
+    nodes: &[kdl::KdlNode],
+    plugin: &str,
+    context: RuntimeDeclarationContext,
+) -> Result<Vec<RuntimeDeclaration>> {
     let mut declarations = Vec::new();
     let mut index = 0;
     while index < nodes.len() {
         let child = &nodes[index];
         match child.name().value() {
             "opt" => {
-                let (key, value) = parse_runtime_branch_option(child, plugin)?;
+                let (key, value) = parse_plugin_option(child, plugin)?;
                 declarations.push(RuntimeDeclaration::Option { key, value });
             }
             "env" | "unset-env" => declarations
@@ -341,6 +304,15 @@ fn parse_runtime_branch_body(node: &kdl::KdlNode, plugin: &str) -> Result<Vec<Ru
                 }
             }
             "else" => bail!("plugin \"{plugin}\": else must immediately follow an if node"),
+            "enabled" if matches!(context, RuntimeDeclarationContext::Plugin) => bail!(
+                "plugin \"{plugin}\": enabled child form is reserved; use enabled=#true, enabled=#false, or enabled=\"shell predicate\""
+            ),
+            "cond" if matches!(context, RuntimeDeclarationContext::Plugin) => bail!(
+                "plugin \"{plugin}\": cond child form is reserved; use cond=#true, cond=#false, or cond=\"shell predicate\""
+            ),
+            unknown if matches!(context, RuntimeDeclarationContext::Plugin) => {
+                bail!("plugin \"{plugin}\": unknown child \"{unknown}\"")
+            }
             unknown => bail!(
                 "plugin \"{plugin}\": runtime configuration branch only allows opt, env, unset-env, bind, and nested if nodes (found \"{unknown}\")"
             ),
@@ -348,10 +320,6 @@ fn parse_runtime_branch_body(node: &kdl::KdlNode, plugin: &str) -> Result<Vec<Ru
         index += 1;
     }
     Ok(declarations)
-}
-
-fn parse_runtime_branch_option(node: &kdl::KdlNode, plugin: &str) -> Result<(String, String)> {
-    parse_plugin_option(node, plugin)
 }
 
 fn parse_plugin_option(node: &kdl::KdlNode, plugin: &str) -> Result<(String, String)> {

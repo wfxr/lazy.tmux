@@ -2,6 +2,10 @@
 
 use std::path::Path;
 
+use tmup::config_mode::{
+    ConfigMode, ResolutionIntent, ResolvedConfig, load_from_sources_with_intent,
+};
+
 pub const MALFORMED_ENVIRONMENT_NODES: &[(&str, &str)] = &[
     (r#"plugin "user/repo" { env "NAME" }"#, "exactly 2 string arguments"),
     (r#"plugin "user/repo" { env "NAME" "value" "extra" }"#, "exactly 2 string arguments"),
@@ -101,6 +105,24 @@ pub fn write_file(path: &Path, content: &str) {
         std::fs::create_dir_all(parent).unwrap();
     }
     std::fs::write(path, content).unwrap();
+}
+
+pub fn load_native_config(input: &str) -> anyhow::Result<ResolvedConfig> {
+    load_native_config_with_intent(input, ResolutionIntent::ManagedState)
+}
+
+pub fn load_native_runtime_config(input: &str) -> anyhow::Result<ResolvedConfig> {
+    load_native_config_with_intent(input, ResolutionIntent::RuntimeConfiguration)
+}
+
+fn load_native_config_with_intent(
+    input: &str,
+    intent: ResolutionIntent,
+) -> anyhow::Result<ResolvedConfig> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("tmup.kdl");
+    std::fs::write(&path, input)?;
+    Ok(load_from_sources_with_intent(ConfigMode::Pure, Some(&path), None, intent)?.config)
 }
 
 /// Run a hermetic git command in the given directory.

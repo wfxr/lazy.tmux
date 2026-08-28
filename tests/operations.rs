@@ -7,14 +7,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tempfile::tempdir;
-use tmup::config::parse_config;
 use tmup::lockfile::{LockEntry, LockFile, read_lockfile};
-use tmup::model::{Config, Options, PluginSource, PluginSpec, Tracking};
+use tmup::model::{Config, Options, PluginSource, PluginSpec, RuntimeConfiguration, Tracking};
 use tmup::progress::NullReporter;
 use tmup::state::{Paths, build_command_hash};
 use tmup::sync::{self, SyncMode, SyncPolicy};
 use tmup::{planner, plugin, prepare};
-use utils::*;
+use utils::{load_native_config as parse_config, *};
 
 /// Create a minimal but real git repo at `path` with one commit, returning
 /// the HEAD commit hash.
@@ -73,9 +72,7 @@ fn make_plugin(
         opt_prefix: String::new(),
         tracking,
         build: build.map(String::from),
-        opts: vec![],
-        environment: vec![],
-        bindings: vec![],
+        runtime: RuntimeConfiguration::Unresolved,
     }
 }
 

@@ -9,10 +9,10 @@ use tmup::planner::{
 };
 use tmup::state::{FailureMarker, Paths, build_command_hash};
 use tmup::sync;
-use utils::git;
+use utils::{git, load_native_config};
 
 fn make_config(kdl: &str) -> Config {
-    tmup::config::parse_config(kdl).unwrap()
+    load_native_config(kdl).unwrap().into_config()
 }
 
 #[test]

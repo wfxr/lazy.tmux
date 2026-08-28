@@ -5,7 +5,7 @@ use tmup::config_mode::{
     ConfigMode, LoadRequest, ResolutionIntent, TmupConfigPolicy, TpmConfigPolicy,
     load_from_sources, load_from_sources_with_intent, load_with_request,
 };
-use tmup::model::{PluginSource, Tracking};
+use tmup::model::{PluginSource, RuntimeConfiguration, Tracking};
 use tmup::state::Paths;
 use utils::write_file;
 
@@ -431,6 +431,14 @@ plugin "{}" local=#true cond=#false
         loaded.config.load_eligibility().map(|eligibility| eligibility.values()),
         Some(&[true, false, true, false, false][..])
     );
+    assert!(loaded.config.runtime_configuration().is_none());
+    assert!(
+        loaded
+            .config
+            .plugins
+            .iter()
+            .all(|plugin| matches!(plugin.runtime, RuntimeConfiguration::Unresolved))
+    );
 }
 
 #[test]
@@ -460,8 +468,8 @@ plugin "user/repo" {
     )
     .unwrap();
 
-    let keys: Vec<_> =
-        loaded.config.plugins[0].bindings.iter().map(|binding| binding.key.as_str()).collect();
+    let (_, runtime) = loaded.config.runtime_configuration().unwrap().plugins().next().unwrap();
+    let keys: Vec<_> = runtime.bindings.iter().map(|binding| binding.key.as_str()).collect();
     assert_eq!(keys, ["always", "otherwise"]);
 }
 
@@ -495,8 +503,8 @@ plugin "user/repo" {
     )
     .unwrap();
 
-    let keys: Vec<_> =
-        loaded.config.plugins[0].bindings.iter().map(|binding| binding.key.as_str()).collect();
+    let (_, runtime) = loaded.config.runtime_configuration().unwrap().plugins().next().unwrap();
+    let keys: Vec<_> = runtime.bindings.iter().map(|binding| binding.key.as_str()).collect();
     assert_eq!(keys, ["host"]);
 }
 
@@ -580,9 +588,9 @@ plugin "user/repo" {
     )
     .unwrap();
 
-    assert!(loaded.config.plugins[0].environment.is_empty());
-    assert!(loaded.config.plugins[0].opts.is_empty());
-    assert!(loaded.config.plugins[0].bindings.is_empty());
+    let (_, runtime) = loaded.config.runtime_configuration().unwrap().plugins().next().unwrap();
+    assert!(runtime.setup.is_empty());
+    assert!(runtime.bindings.is_empty());
 }
 
 #[test]
@@ -701,9 +709,13 @@ plugin "user/repo" branch="feature" {
         &loaded.config.plugins[1].tracking,
         Tracking::Branch(branch) if branch == "feature"
     ));
-    let keys: Vec<_> =
-        loaded.config.plugins[1].bindings.iter().map(|binding| binding.key.as_str()).collect();
+    let runtimes: Vec<_> = loaded.config.runtime_configuration().unwrap().plugins().collect();
+    assert!(runtimes[0].1.setup.is_empty());
+    assert!(runtimes[0].1.bindings.is_empty());
+    let keys: Vec<_> = runtimes[1].1.bindings.iter().map(|binding| binding.key.as_str()).collect();
     assert_eq!(keys, ["otherwise"]);
+    assert!(runtimes[2].1.setup.is_empty());
+    assert!(runtimes[2].1.bindings.is_empty());
     assert_eq!(loaded.warnings.len(), 1);
 }
 
@@ -760,6 +772,7 @@ fn managed_state_resolution_does_not_evaluate_load_conditions() {
 
     assert_eq!(loaded.config.plugins.len(), 1);
     assert!(loaded.config.load_eligibility().is_none());
+    assert!(loaded.config.runtime_configuration().is_none());
 }
 
 #[test]

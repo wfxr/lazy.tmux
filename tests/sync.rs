@@ -5,7 +5,7 @@ use tempfile::tempdir;
 use tmup::lockfile::{
     LockEntry, LockFile, config_fingerprint, read_lockfile, remote_plugin_config_hash,
 };
-use tmup::model::{Config, Options, PluginSource, PluginSpec, Tracking};
+use tmup::model::{Config, Options, PluginSource, PluginSpec, RuntimeConfiguration, Tracking};
 use tmup::progress::{NullReporter, PluginStage, ProgressEvent, ProgressReporter};
 use tmup::state::{FailureMarker, Paths, build_command_hash};
 use tmup::sync::{self, SyncMode, SyncPolicy};
@@ -28,9 +28,7 @@ fn make_plugin(
         opt_prefix: String::new(),
         tracking,
         build: build.map(String::from),
-        opts: vec![],
-        environment: vec![],
-        bindings: vec![],
+        runtime: RuntimeConfiguration::Unresolved,
     }
 }
 

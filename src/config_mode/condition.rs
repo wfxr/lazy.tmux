@@ -7,8 +7,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 
 use crate::config::{Condition, PluginDeclaration, RuntimeDeclaration};
-use crate::config_mode::{ResolutionIntent, RuntimeSetup};
-use crate::model::{KeyBinding, PluginSpec};
+use crate::config_mode::{ResolutionIntent, ResolutionState};
+use crate::model::{
+    PluginRuntime, PluginSpec, RuntimeConfiguration as PluginRuntimeConfiguration, SetupOperation,
+};
 
 const CONDITION_TIMEOUT: Duration = Duration::from_secs(5);
 const CONDITION_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -111,8 +113,7 @@ fn outcome_from_status(status: std::process::ExitStatus) -> ProcessOutcome {
 #[derive(Debug)]
 pub(super) struct ResolvedPlugins {
     pub(super) plugins: Vec<PluginSpec>,
-    pub(super) load_eligibility: Option<Vec<bool>>,
-    pub(super) runtime_setup: Option<Vec<Vec<RuntimeSetup>>>,
+    pub(super) state: ResolutionState,
 }
 
 pub(super) fn resolve_plugins(
@@ -165,70 +166,36 @@ fn resolve_plugins_with_runner(
         None
     };
     let mut plugins = Vec::with_capacity(enabled_declarations.len());
-    let mut runtime_setup =
-        load_eligibility.as_ref().map(|_| Vec::with_capacity(enabled_declarations.len()));
     for (index, mut declaration) in enabled_declarations.into_iter().enumerate() {
-        let setup = if matches!(intent, ResolutionIntent::RuntimeConfiguration)
+        if matches!(intent, ResolutionIntent::RuntimeConfiguration)
             && load_eligibility.as_ref().is_some_and(|values| values[index])
         {
             let projection = project_runtime_configuration(&declaration, working_dir, process)?;
-            declaration.spec.opts = projection
-                .setup
-                .iter()
-                .filter_map(|declaration| match declaration {
-                    RuntimeSetup::Option { key, value } => Some((key.clone(), value.clone())),
-                    RuntimeSetup::Environment(_) => None,
-                })
-                .collect();
-            declaration.spec.environment = projection
-                .setup
-                .iter()
-                .filter_map(|declaration| match declaration {
-                    RuntimeSetup::Environment(operation) => Some(operation.clone()),
-                    RuntimeSetup::Option { .. } => None,
-                })
-                .collect();
-            declaration.spec.bindings = projection.bindings;
-            projection.setup
+            declaration.spec.runtime = PluginRuntimeConfiguration::Selected(projection);
         } else {
-            unconditional_runtime_setup(&declaration.runtime)
-        };
-        if let Some(runtime_setup) = &mut runtime_setup {
-            runtime_setup.push(setup);
+            declaration.spec.runtime = PluginRuntimeConfiguration::Unresolved;
         }
         plugins.push(declaration.spec);
     }
 
-    Ok(ResolvedPlugins { plugins, load_eligibility, runtime_setup })
-}
-
-#[derive(Default)]
-struct RuntimeProjection {
-    setup: Vec<RuntimeSetup>,
-    bindings: Vec<KeyBinding>,
-}
-
-fn unconditional_runtime_setup(declarations: &[RuntimeDeclaration]) -> Vec<RuntimeSetup> {
-    declarations
-        .iter()
-        .filter_map(|declaration| match declaration {
-            RuntimeDeclaration::Option { key, value } => {
-                Some(RuntimeSetup::Option { key: key.clone(), value: value.clone() })
-            }
-            RuntimeDeclaration::Environment(operation) => {
-                Some(RuntimeSetup::Environment(operation.clone()))
-            }
-            RuntimeDeclaration::Binding(_) | RuntimeDeclaration::Branch { .. } => None,
-        })
-        .collect()
+    let state = match intent {
+        ResolutionIntent::ManagedState => ResolutionState::ManagedState,
+        ResolutionIntent::LoadEligibility => {
+            ResolutionState::LoadEligibility(load_eligibility.expect("resolved above"))
+        }
+        ResolutionIntent::RuntimeConfiguration => {
+            ResolutionState::RuntimeConfiguration(load_eligibility.expect("resolved above"))
+        }
+    };
+    Ok(ResolvedPlugins { plugins, state })
 }
 
 fn project_runtime_configuration(
     declaration: &PluginDeclaration,
     working_dir: &Path,
     process: &impl ConditionProcess,
-) -> Result<RuntimeProjection> {
-    let mut projection = RuntimeProjection::default();
+) -> Result<PluginRuntime> {
+    let mut projection = PluginRuntime::default();
     project_runtime_declarations(
         &declaration.runtime,
         declaration,
@@ -244,17 +211,17 @@ fn project_runtime_declarations(
     plugin: &PluginDeclaration,
     working_dir: &Path,
     process: &impl ConditionProcess,
-    projection: &mut RuntimeProjection,
+    projection: &mut PluginRuntime,
 ) -> Result<()> {
     for declaration in declarations {
         match declaration {
             RuntimeDeclaration::Option { key, value } => {
                 projection
                     .setup
-                    .push(RuntimeSetup::Option { key: key.clone(), value: value.clone() });
+                    .push(SetupOperation::Option { key: key.clone(), value: value.clone() });
             }
             RuntimeDeclaration::Environment(operation) => {
-                projection.setup.push(RuntimeSetup::Environment(operation.clone()));
+                projection.setup.push(SetupOperation::Environment(operation.clone()));
             }
             RuntimeDeclaration::Binding(binding) => {
                 projection.bindings.push(binding.clone());
@@ -415,7 +382,10 @@ plugin "user/third" enabled="enable-third" cond="load-third"
 
         let names: Vec<_> = resolved.plugins.iter().map(|plugin| plugin.name.as_str()).collect();
         assert_eq!(names, ["first", "third"]);
-        assert_eq!(resolved.load_eligibility.as_deref(), Some(&[true, false][..]));
+        let ResolutionState::LoadEligibility(load_eligibility) = resolved.state else {
+            panic!("expected Load Eligibility resolution state");
+        };
+        assert_eq!(load_eligibility, [true, false]);
         assert_eq!(
             process.calls.into_inner(),
             ["enable-first", "enable-disabled", "enable-third", "load-first", "load-third"]

@@ -1,4 +1,6 @@
-use tmup::config::parse_config;
+mod utils;
+
+use utils::load_native_config as parse_config;
 
 #[test]
 fn normalizes_github_shorthand_to_full_id() {

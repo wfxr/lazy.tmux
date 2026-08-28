@@ -6,7 +6,9 @@ use anyhow::{Context, Result};
 use clap::ValueEnum;
 
 use crate::config::{Condition, ParsedConfig, PluginDeclaration};
-use crate::model::{Config, EnvironmentOperation, PluginSpec};
+use crate::model::{
+    Config, PluginRuntime, PluginSpec, RuntimeConfiguration as PluginRuntimeConfiguration,
+};
 use crate::state::Paths;
 use crate::{config, config_tpm};
 
@@ -33,46 +35,72 @@ pub enum ResolutionIntent {
     RuntimeConfiguration,
 }
 
-/// One resolved Effective Plugin Specification with optional Load Eligibility.
+/// One resolved Effective Plugin Specification with intent-specific runtime state.
 #[derive(Debug)]
 pub struct ResolvedConfig {
     config: Config,
-    load_eligibility: Option<Vec<bool>>,
-    runtime_setup: Option<Vec<Vec<RuntimeSetup>>>,
+    state: ResolutionState,
 }
 
 impl ResolvedConfig {
-    fn new(
-        config: Config,
-        load_eligibility: Option<Vec<bool>>,
-        runtime_setup: Option<Vec<Vec<RuntimeSetup>>>,
-    ) -> Self {
-        debug_assert!(
-            load_eligibility
-                .as_ref()
-                .is_none_or(|eligibility| eligibility.len() == config.plugins.len())
-        );
-        debug_assert!(
-            runtime_setup.as_ref().is_none_or(|setup| setup.len() == config.plugins.len())
-        );
-        debug_assert_eq!(load_eligibility.is_some(), runtime_setup.is_some());
-        Self { config, load_eligibility, runtime_setup }
+    fn new(config: Config, state: ResolutionState) -> Self {
+        if let Some(values) = state.load_eligibility() {
+            debug_assert_eq!(values.len(), config.plugins.len());
+        }
+        match &state {
+            ResolutionState::ManagedState | ResolutionState::LoadEligibility(_) => {
+                debug_assert!(config.plugins.iter().all(|plugin| {
+                    matches!(plugin.runtime, PluginRuntimeConfiguration::Unresolved)
+                }));
+            }
+            ResolutionState::RuntimeConfiguration(values) => {
+                debug_assert!(config.plugins.iter().zip(values).all(|(plugin, eligible)| {
+                    *eligible == matches!(plugin.runtime, PluginRuntimeConfiguration::Selected(_))
+                }));
+            }
+        }
+        Self { config, state }
     }
 
     /// Borrow Load Eligibility tied to this snapshot's ordered plugins.
     pub fn load_eligibility(&self) -> Option<LoadEligibility<'_>> {
-        self.load_eligibility.as_deref().zip(self.runtime_setup.as_deref()).map(
-            |(values, runtime_setup)| LoadEligibility {
-                plugins: &self.config.plugins,
-                values,
-                runtime_setup,
-            },
-        )
+        self.state
+            .load_eligibility()
+            .map(|values| LoadEligibility { plugins: &self.config.plugins, values })
     }
 
-    /// Discard optional loading metadata and return the managed-state config.
+    /// Borrow the runtime-ready plugin selection for an Init Session.
+    pub fn runtime_configuration(&self) -> Option<RuntimeConfigurationSnapshot<'_>> {
+        match &self.state {
+            ResolutionState::RuntimeConfiguration(load_eligibility) => {
+                Some(RuntimeConfigurationSnapshot {
+                    plugins: &self.config.plugins,
+                    load_eligibility,
+                })
+            }
+            ResolutionState::ManagedState | ResolutionState::LoadEligibility(_) => None,
+        }
+    }
+
+    /// Consume this snapshot and return its Effective Plugin Specification.
     pub fn into_config(self) -> Config {
         self.config
+    }
+}
+
+#[derive(Debug)]
+pub(super) enum ResolutionState {
+    ManagedState,
+    LoadEligibility(Vec<bool>),
+    RuntimeConfiguration(Vec<bool>),
+}
+
+impl ResolutionState {
+    fn load_eligibility(&self) -> Option<&[bool]> {
+        match self {
+            Self::ManagedState => None,
+            Self::LoadEligibility(values) | Self::RuntimeConfiguration(values) => Some(values),
+        }
     }
 }
 
@@ -89,7 +117,6 @@ impl Deref for ResolvedConfig {
 pub struct LoadEligibility<'snapshot> {
     plugins: &'snapshot [PluginSpec],
     values: &'snapshot [bool],
-    runtime_setup: &'snapshot [Vec<RuntimeSetup>],
 }
 
 impl<'snapshot> LoadEligibility<'snapshot> {
@@ -102,20 +129,32 @@ impl<'snapshot> LoadEligibility<'snapshot> {
     pub fn values(self) -> &'snapshot [bool] {
         self.values
     }
-
-    pub(crate) fn plugins_with_runtime_setup(
-        self,
-    ) -> impl Iterator<Item = (&'snapshot PluginSpec, bool, &'snapshot [RuntimeSetup])> {
-        self.plugins()
-            .zip(self.runtime_setup.iter())
-            .map(|((plugin, eligible), setup)| (plugin, eligible, setup.as_slice()))
-    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RuntimeSetup {
-    Environment(EnvironmentOperation),
-    Option { key: String, value: String },
+/// Runtime-ready view of every load-eligible plugin in one Init Session snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeConfigurationSnapshot<'snapshot> {
+    plugins: &'snapshot [PluginSpec],
+    load_eligibility: &'snapshot [bool],
+}
+
+impl<'snapshot> RuntimeConfigurationSnapshot<'snapshot> {
+    /// Iterate over load-eligible plugins and their selected runtime declarations.
+    pub fn plugins(
+        self,
+    ) -> impl Iterator<Item = (&'snapshot PluginSpec, &'snapshot PluginRuntime)> {
+        self.plugins.iter().zip(self.load_eligibility).filter_map(|(plugin, eligible)| {
+            if !eligible {
+                return None;
+            }
+            match &plugin.runtime {
+                PluginRuntimeConfiguration::Selected(runtime) => Some((plugin, runtime)),
+                PluginRuntimeConfiguration::Unresolved => {
+                    unreachable!("runtime-ready snapshots select every load-eligible plugin")
+                }
+            }
+        })
+    }
 }
 
 /// Policy for handling the primary tmup.kdl during config load.
@@ -147,7 +186,7 @@ pub struct LoadRequest {
     pub tmup_policy: TmupConfigPolicy,
     /// How the optional TPM-compatible tmux config should be sourced.
     pub tpm_policy: TpmConfigPolicy,
-    /// Whether the caller needs Load Eligibility in addition to managed state.
+    /// Which condition and runtime state the caller needs resolved.
     pub intent: ResolutionIntent,
 }
 
@@ -297,11 +336,7 @@ fn resolve_loaded_config(
         .unwrap_or_else(|| Path::new("."));
     let ParsedConfig { options, plugins, warnings } = parsed;
     let resolved = condition::resolve_plugins(plugins, working_dir, intent)?;
-    let config = ResolvedConfig::new(
-        Config { options, plugins: resolved.plugins },
-        resolved.load_eligibility,
-        resolved.runtime_setup,
-    );
+    let config = ResolvedConfig::new(Config { options, plugins: resolved.plugins }, resolved.state);
     Ok(LoadedConfig {
         config,
         warnings,

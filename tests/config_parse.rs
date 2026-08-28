@@ -1,8 +1,10 @@
 mod utils;
 
-use tmup::config::parse_config;
-use tmup::model::{EnvironmentOperation, KeyBinding};
-use utils::{MALFORMED_BINDING_NODES, MALFORMED_ENVIRONMENT_NODES};
+use tmup::model::{EnvironmentOperation, KeyBinding, SetupOperation};
+use utils::{
+    MALFORMED_BINDING_NODES, MALFORMED_ENVIRONMENT_NODES, load_native_config as parse_config,
+    load_native_runtime_config,
+};
 
 #[test]
 fn parses_remote_and_local_plugins() {
@@ -47,17 +49,21 @@ plugin "catppuccin/tmux" opt-prefix="catppuccin_" {
     opt "window_text" "#W"
 }
     "##;
-    let cfg = parse_config(input).unwrap();
-    let p = &cfg.plugins[0];
-    assert_eq!(p.opt_prefix, "catppuccin_");
-    assert_eq!(p.opts.len(), 2);
-    assert_eq!(p.opts[0], ("flavor".into(), "mocha".into()));
-    assert_eq!(p.opts[1], ("window_text".into(), "#W".into()));
+    let cfg = load_native_runtime_config(input).unwrap();
+    let (plugin, runtime) = cfg.runtime_configuration().unwrap().plugins().next().unwrap();
+    assert_eq!(plugin.opt_prefix, "catppuccin_");
+    assert_eq!(
+        runtime.setup,
+        vec![
+            SetupOperation::Option { key: "flavor".into(), value: "mocha".into() },
+            SetupOperation::Option { key: "window_text".into(), value: "#W".into() },
+        ]
+    );
 }
 
 #[test]
 fn parses_ordered_environment_operations_for_remote_and_local_plugins() {
-    let cfg = parse_config(
+    let cfg = load_native_runtime_config(
         r#"
 plugin "user/remote" {
     env "MODE" "remote"
@@ -71,23 +77,32 @@ plugin "/opt/plugins/local" local=#true {
     )
     .unwrap();
 
+    let mut runtimes = cfg.runtime_configuration().unwrap().plugins();
+    let (_, remote_runtime) = runtimes.next().unwrap();
+    let (_, local_runtime) = runtimes.next().unwrap();
     assert_eq!(
-        cfg.plugins[0].environment,
+        remote_runtime.setup,
         vec![
-            EnvironmentOperation::Set { name: "MODE".into(), value: "remote".into() },
-            EnvironmentOperation::Unset { name: "LEGACY_MODE".into() },
-            EnvironmentOperation::Set { name: "MODE".into(), value: "".into() },
+            SetupOperation::Environment(EnvironmentOperation::Set {
+                name: "MODE".into(),
+                value: "remote".into(),
+            }),
+            SetupOperation::Environment(EnvironmentOperation::Unset { name: "LEGACY_MODE".into() }),
+            SetupOperation::Environment(EnvironmentOperation::Set {
+                name: "MODE".into(),
+                value: "".into(),
+            }),
         ]
     );
     assert_eq!(
-        cfg.plugins[1].environment,
-        vec![EnvironmentOperation::Unset { name: "MODE".into() }]
+        local_runtime.setup,
+        vec![SetupOperation::Environment(EnvironmentOperation::Unset { name: "MODE".into() })]
     );
 }
 
 #[test]
 fn parses_ordered_shell_bindings_for_remote_and_local_plugins() {
-    let cfg = parse_config(
+    let cfg = load_native_runtime_config(
         r##"
 plugin "user/remote" {
     bind "C-w" {
@@ -108,8 +123,11 @@ plugin "/opt/plugins/local" local=#true {
     )
     .unwrap();
 
+    let mut runtimes = cfg.runtime_configuration().unwrap().plugins();
+    let (_, remote_runtime) = runtimes.next().unwrap();
+    let (_, local_runtime) = runtimes.next().unwrap();
     assert_eq!(
-        cfg.plugins[0].bindings,
+        remote_runtime.bindings,
         vec![
             KeyBinding {
                 key: "C-w".into(),
@@ -126,7 +144,7 @@ plugin "/opt/plugins/local" local=#true {
         ]
     );
     assert_eq!(
-        cfg.plugins[1].bindings,
+        local_runtime.bindings,
         vec![KeyBinding {
             key: "M-l".into(),
             options: vec![],
