@@ -271,6 +271,7 @@ fn parse_runtime_branch(
 }
 
 fn parse_runtime_branch_condition(node: &kdl::KdlNode, plugin: &str) -> Result<Condition> {
+    ensure!(node.ty().is_none(), "plugin \"{plugin}\": if does not support KDL type annotations");
     ensure!(
         node.entries().iter().all(|entry| entry.name().is_none()),
         "plugin \"{plugin}\": if must not have properties"

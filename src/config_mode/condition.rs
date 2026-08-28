@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 
 use crate::config::{Condition, PluginDeclaration, RuntimeDeclaration};
-use crate::config_mode::ResolutionIntent;
-use crate::model::{EnvironmentOperation, KeyBinding, PluginSpec};
+use crate::config_mode::{ResolutionIntent, RuntimeSetup};
+use crate::model::{KeyBinding, PluginSpec};
 
 const CONDITION_TIMEOUT: Duration = Duration::from_secs(5);
 const CONDITION_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -112,6 +112,7 @@ fn outcome_from_status(status: std::process::ExitStatus) -> ProcessOutcome {
 pub(super) struct ResolvedPlugins {
     pub(super) plugins: Vec<PluginSpec>,
     pub(super) load_eligibility: Option<Vec<bool>>,
+    pub(super) runtime_setup: Option<Vec<Vec<RuntimeSetup>>>,
 }
 
 pub(super) fn resolve_plugins(
@@ -163,30 +164,63 @@ fn resolve_plugins_with_runner(
     } else {
         None
     };
-    let plugins = enabled_declarations
-        .into_iter()
-        .enumerate()
-        .map(|(index, mut declaration)| {
-            if matches!(intent, ResolutionIntent::RuntimeConfiguration)
-                && load_eligibility.as_ref().is_some_and(|values| values[index])
-            {
-                let projection = project_runtime_configuration(&declaration, working_dir, process)?;
-                declaration.spec.opts = projection.opts;
-                declaration.spec.environment = projection.environment;
-                declaration.spec.bindings = projection.bindings;
-            }
-            Ok(declaration.spec)
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut plugins = Vec::with_capacity(enabled_declarations.len());
+    let mut runtime_setup =
+        load_eligibility.as_ref().map(|_| Vec::with_capacity(enabled_declarations.len()));
+    for (index, mut declaration) in enabled_declarations.into_iter().enumerate() {
+        let setup = if matches!(intent, ResolutionIntent::RuntimeConfiguration)
+            && load_eligibility.as_ref().is_some_and(|values| values[index])
+        {
+            let projection = project_runtime_configuration(&declaration, working_dir, process)?;
+            declaration.spec.opts = projection
+                .setup
+                .iter()
+                .filter_map(|declaration| match declaration {
+                    RuntimeSetup::Option { key, value } => Some((key.clone(), value.clone())),
+                    RuntimeSetup::Environment(_) => None,
+                })
+                .collect();
+            declaration.spec.environment = projection
+                .setup
+                .iter()
+                .filter_map(|declaration| match declaration {
+                    RuntimeSetup::Environment(operation) => Some(operation.clone()),
+                    RuntimeSetup::Option { .. } => None,
+                })
+                .collect();
+            declaration.spec.bindings = projection.bindings;
+            projection.setup
+        } else {
+            unconditional_runtime_setup(&declaration.runtime)
+        };
+        if let Some(runtime_setup) = &mut runtime_setup {
+            runtime_setup.push(setup);
+        }
+        plugins.push(declaration.spec);
+    }
 
-    Ok(ResolvedPlugins { plugins, load_eligibility })
+    Ok(ResolvedPlugins { plugins, load_eligibility, runtime_setup })
 }
 
 #[derive(Default)]
 struct RuntimeProjection {
-    opts: Vec<(String, String)>,
-    environment: Vec<EnvironmentOperation>,
+    setup: Vec<RuntimeSetup>,
     bindings: Vec<KeyBinding>,
+}
+
+fn unconditional_runtime_setup(declarations: &[RuntimeDeclaration]) -> Vec<RuntimeSetup> {
+    declarations
+        .iter()
+        .filter_map(|declaration| match declaration {
+            RuntimeDeclaration::Option { key, value } => {
+                Some(RuntimeSetup::Option { key: key.clone(), value: value.clone() })
+            }
+            RuntimeDeclaration::Environment(operation) => {
+                Some(RuntimeSetup::Environment(operation.clone()))
+            }
+            RuntimeDeclaration::Binding(_) | RuntimeDeclaration::Branch { .. } => None,
+        })
+        .collect()
 }
 
 fn project_runtime_configuration(
@@ -215,10 +249,12 @@ fn project_runtime_declarations(
     for declaration in declarations {
         match declaration {
             RuntimeDeclaration::Option { key, value } => {
-                projection.opts.push((key.clone(), value.clone()));
+                projection
+                    .setup
+                    .push(RuntimeSetup::Option { key: key.clone(), value: value.clone() });
             }
             RuntimeDeclaration::Environment(operation) => {
-                projection.environment.push(operation.clone());
+                projection.setup.push(RuntimeSetup::Environment(operation.clone()));
             }
             RuntimeDeclaration::Binding(binding) => {
                 projection.bindings.push(binding.clone());

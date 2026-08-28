@@ -137,7 +137,7 @@ async fn resume_with_adapter_in_session(
 ) -> Result<Outcome> {
     match continuation {
         Continuation::DeferredBootstrap(context) => {
-            let loaded = load_context(&context)?;
+            let loaded = load_preview_context(&context)?;
             if !needs_sync_work(&loaded)? {
                 return execute_inline(&context, &loaded.warnings, LockWaitMessage::Announce, tmux)
                     .await;
@@ -241,7 +241,7 @@ fn resolve_normal_invocation(
         config_mode,
         false,
         tpm_policy,
-        ResolutionIntent::RuntimeConfiguration,
+        ResolutionIntent::LoadEligibility,
     );
     let loaded = config_mode::load_with_request(&paths, request)?;
     let context = InvocationContext::new(
@@ -272,7 +272,7 @@ async fn run_with_adapter(
     context: InvocationContext,
     tmux: &mut impl TmuxAdapter,
 ) -> Result<Outcome> {
-    let loaded = load_context(&context)?;
+    let loaded = load_preview_context(&context)?;
     run_loaded_with_adapter(context, loaded, tmux).await
 }
 
@@ -310,15 +310,22 @@ struct LoadedContext {
     warnings: Vec<String>,
 }
 
-fn load_context(context: &InvocationContext) -> Result<LoadedContext> {
+fn load_preview_context(context: &InvocationContext) -> Result<LoadedContext> {
+    load_context_with_intent(context, ResolutionIntent::LoadEligibility)
+}
+
+fn load_runtime_context(context: &InvocationContext) -> Result<LoadedContext> {
+    load_context_with_intent(context, ResolutionIntent::RuntimeConfiguration)
+}
+
+fn load_context_with_intent(
+    context: &InvocationContext,
+    intent: ResolutionIntent,
+) -> Result<LoadedContext> {
     let paths = context_paths(context)?;
     let tpm_policy = context.tpm_identity.policy();
-    let request = config_mode::LoadRequest::from_command(
-        context.config_mode,
-        false,
-        tpm_policy,
-        ResolutionIntent::RuntimeConfiguration,
-    );
+    let request =
+        config_mode::LoadRequest::from_command(context.config_mode, false, tpm_policy, intent);
     let loaded = config_mode::load_with_request(&paths, request)?;
     Ok(LoadedContext { paths: loaded.paths, config: loaded.config, warnings: loaded.warnings })
 }
@@ -373,7 +380,7 @@ async fn execute_inline(
             OperationLock::acquire(&paths.lock_path)?
         }
     };
-    let loaded = load_context(context)?;
+    let loaded = load_runtime_context(context)?;
     emit_warnings(preview_warnings, &loaded.warnings);
     let outcome = execute_core(&loaded, tmux, &NullReporter).await;
     drop(guard);
@@ -384,14 +391,14 @@ async fn execute_hosted(
     context: &InvocationContext,
     tmux: &mut impl TmuxAdapter,
 ) -> Result<Outcome> {
-    let preview = load_context(context)?;
+    let preview = load_preview_context(context)?;
     let reporter = progress::create_reporter(&preview.paths, "init", &preview.config, None);
     reporter.report(ProgressEvent::OperationStart { command: "init" });
     reporter.report(ProgressEvent::OperationStage { stage: OperationStage::WaitingForLock });
 
     let result = {
         let _guard = OperationLock::acquire(&preview.paths.lock_path)?;
-        let loaded = load_context(context)?;
+        let loaded = load_runtime_context(context)?;
         emit_warnings(&preview.warnings, &loaded.warnings);
         execute_core(&loaded, tmux, &*reporter).await
     };
@@ -1411,7 +1418,7 @@ plugin "{}" local=#true {{
     }
 
     #[tokio::test]
-    async fn runtime_configuration_preview_is_advisory_and_authoritative_snapshot_is_frozen() {
+    async fn runtime_configuration_is_resolved_once_and_frozen_for_loading() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
         let plugin_dir = dir.path().join("local-plugin");
@@ -1422,10 +1429,10 @@ plugin "{}" local=#true {{
                 r#"
 plugin "{}" local=#true {{
     if "n=$(cat branch-evaluations 2>/dev/null || printf 0); n=$((n+1)); printf %s $n > branch-evaluations; test $n -eq 1" {{
-        bind "preview" {{ shell "./preview" }}
+        bind "selected" {{ shell "./selected" }}
     }}
     else {{
-        bind "authoritative" {{ shell "./authoritative" }}
+        bind "otherwise" {{ shell "./otherwise" }}
     }}
 }}
 "#,
@@ -1442,8 +1449,8 @@ plugin "{}" local=#true {{
                 context.config_path.parent().unwrap().join("branch-evaluations")
             )
             .unwrap(),
-            "2",
-            "init may evaluate the branch once for preview and once for authoritative execution"
+            "1",
+            "one Init Session must evaluate each reachable runtime branch exactly once"
         );
         let Request::Load(plan) = tmux.requests.last().unwrap() else {
             panic!("init must execute its tmux load plan");
@@ -1457,13 +1464,13 @@ plugin "{}" local=#true {{
                 },
                 TmuxCommand::BindKey {
                     options: vec![],
-                    key: "authoritative".into(),
+                    key: "selected".into(),
                     plugin_dir,
-                    shell: "./authoritative".into(),
+                    shell: "./selected".into(),
                     background: false,
                 },
             ],
-            "loading must use the frozen authoritative branch selection"
+            "loading must reuse the frozen runtime branch selection"
         );
     }
 

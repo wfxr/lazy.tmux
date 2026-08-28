@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use clap::ValueEnum;
 
 use crate::config::{Condition, ParsedConfig, PluginDeclaration};
-use crate::model::{Config, PluginSpec};
+use crate::model::{Config, EnvironmentOperation, PluginSpec};
 use crate::state::Paths;
 use crate::{config, config_tpm};
 
@@ -38,23 +38,36 @@ pub enum ResolutionIntent {
 pub struct ResolvedConfig {
     config: Config,
     load_eligibility: Option<Vec<bool>>,
+    runtime_setup: Option<Vec<Vec<RuntimeSetup>>>,
 }
 
 impl ResolvedConfig {
-    fn new(config: Config, load_eligibility: Option<Vec<bool>>) -> Self {
+    fn new(
+        config: Config,
+        load_eligibility: Option<Vec<bool>>,
+        runtime_setup: Option<Vec<Vec<RuntimeSetup>>>,
+    ) -> Self {
         debug_assert!(
             load_eligibility
                 .as_ref()
                 .is_none_or(|eligibility| eligibility.len() == config.plugins.len())
         );
-        Self { config, load_eligibility }
+        debug_assert!(
+            runtime_setup.as_ref().is_none_or(|setup| setup.len() == config.plugins.len())
+        );
+        debug_assert_eq!(load_eligibility.is_some(), runtime_setup.is_some());
+        Self { config, load_eligibility, runtime_setup }
     }
 
     /// Borrow Load Eligibility tied to this snapshot's ordered plugins.
     pub fn load_eligibility(&self) -> Option<LoadEligibility<'_>> {
-        self.load_eligibility
-            .as_deref()
-            .map(|values| LoadEligibility { plugins: &self.config.plugins, values })
+        self.load_eligibility.as_deref().zip(self.runtime_setup.as_deref()).map(
+            |(values, runtime_setup)| LoadEligibility {
+                plugins: &self.config.plugins,
+                values,
+                runtime_setup,
+            },
+        )
     }
 
     /// Discard optional loading metadata and return the managed-state config.
@@ -76,6 +89,7 @@ impl Deref for ResolvedConfig {
 pub struct LoadEligibility<'snapshot> {
     plugins: &'snapshot [PluginSpec],
     values: &'snapshot [bool],
+    runtime_setup: &'snapshot [Vec<RuntimeSetup>],
 }
 
 impl<'snapshot> LoadEligibility<'snapshot> {
@@ -88,6 +102,20 @@ impl<'snapshot> LoadEligibility<'snapshot> {
     pub fn values(self) -> &'snapshot [bool] {
         self.values
     }
+
+    pub(crate) fn plugins_with_runtime_setup(
+        self,
+    ) -> impl Iterator<Item = (&'snapshot PluginSpec, bool, &'snapshot [RuntimeSetup])> {
+        self.plugins()
+            .zip(self.runtime_setup.iter())
+            .map(|((plugin, eligible), setup)| (plugin, eligible, setup.as_slice()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RuntimeSetup {
+    Environment(EnvironmentOperation),
+    Option { key: String, value: String },
 }
 
 /// Policy for handling the primary tmup.kdl during config load.
@@ -272,6 +300,7 @@ fn resolve_loaded_config(
     let config = ResolvedConfig::new(
         Config { options, plugins: resolved.plugins },
         resolved.load_eligibility,
+        resolved.runtime_setup,
     );
     Ok(LoadedConfig {
         config,

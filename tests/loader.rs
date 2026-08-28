@@ -19,7 +19,7 @@ fn resolve_config(root: &std::path::Path, input: &str) -> ResolvedConfig {
 }
 
 #[test]
-fn loader_sets_env_then_opts_then_runs_tmux_files_in_order() {
+fn loader_applies_setup_then_runs_tmux_files_in_order() {
     let dir = tempdir().unwrap();
     let plugin_root = dir.path().join("plugins");
 
@@ -280,13 +280,13 @@ plugin "user/plugin" opt-prefix="p_" {
                 value: format!("{}/", plugin_root.display()),
             },
             TmuxCommand::SetEnvironment { key: "OUTSIDE_BEFORE".into(), value: "one".into() },
+            TmuxCommand::SetOption { key: "p_outside_before".into(), value: "one".into() },
             TmuxCommand::SetEnvironment { key: "BRANCH_SET".into(), value: "two".into() },
             TmuxCommand::UnsetEnvironment { key: "BRANCH_UNSET".into() },
-            TmuxCommand::SetEnvironment { key: "OUTSIDE_AFTER".into(), value: "three".into() },
-            TmuxCommand::UnsetEnvironment { key: "OUTSIDE_UNSET".into() },
-            TmuxCommand::SetOption { key: "p_outside_before".into(), value: "one".into() },
             TmuxCommand::SetOption { key: "p_branch_first".into(), value: "two".into() },
             TmuxCommand::SetOption { key: "p_branch_second".into(), value: "three".into() },
+            TmuxCommand::SetEnvironment { key: "OUTSIDE_AFTER".into(), value: "three".into() },
+            TmuxCommand::UnsetEnvironment { key: "OUTSIDE_UNSET".into() },
             TmuxCommand::SetOption { key: "p_outside_after".into(), value: "four".into() },
             TmuxCommand::RunShell { script: plugin_dir.join("plugin.tmux") },
             TmuxCommand::BindKey {

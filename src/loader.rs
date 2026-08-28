@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::config_mode::LoadEligibility;
+use crate::config_mode::{LoadEligibility, RuntimeSetup};
 use crate::model::{EnvironmentOperation, PluginSource, PluginSpec};
 use crate::tmux::TmuxCommand;
 
@@ -41,39 +41,37 @@ pub fn build_load_plan(load_eligibility: LoadEligibility<'_>, plugin_root: &Path
     let mut plugin_commands = Vec::new();
 
     // 2. Configure each eligible plugin in declaration order.
-    for (spec, load_eligible) in load_eligibility.plugins() {
+    for (spec, load_eligible, runtime_setup) in load_eligibility.plugins_with_runtime_setup() {
         if !load_eligible {
             continue;
         }
-        for operation in &spec.environment {
-            match operation {
-                EnvironmentOperation::Set { name, value } => {
+        for declaration in runtime_setup {
+            match declaration {
+                RuntimeSetup::Environment(EnvironmentOperation::Set { name, value }) => {
                     push_plugin_command(
                         &mut plugin_commands,
                         spec,
                         TmuxCommand::SetEnvironment { key: name.clone(), value: value.clone() },
                     );
                 }
-                EnvironmentOperation::Unset { name } => {
+                RuntimeSetup::Environment(EnvironmentOperation::Unset { name }) => {
                     push_plugin_command(
                         &mut plugin_commands,
                         spec,
                         TmuxCommand::UnsetEnvironment { key: name.clone() },
                     );
                 }
+                RuntimeSetup::Option { key, value } => {
+                    push_plugin_command(
+                        &mut plugin_commands,
+                        spec,
+                        TmuxCommand::SetOption {
+                            key: format!("{}{}", spec.opt_prefix, key),
+                            value: value.clone(),
+                        },
+                    );
+                }
             }
-        }
-
-        // Apply opt settings
-        for (key, value) in &spec.opts {
-            push_plugin_command(
-                &mut plugin_commands,
-                spec,
-                TmuxCommand::SetOption {
-                    key: format!("{}{}", spec.opt_prefix, key),
-                    value: value.clone(),
-                },
-            );
         }
     }
 

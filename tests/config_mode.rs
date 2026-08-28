@@ -342,6 +342,7 @@ fn invalid_runtime_configuration_branch_forms_are_rejected_before_predicates_run
         (r#"if "" {}"#, "if shell predicate must not be empty"),
         ("if #true future=#true {}", "if must not have properties"),
         ("if (future)#true {}", "if does not support KDL type annotations"),
+        ("(future)if #true {}", "if does not support KDL type annotations"),
         ("if #true", "if requires a child block"),
         ("if #true {}\nelse \"entry\" {}", "else must not have arguments or properties"),
         ("if #true {}\nelse", "else requires a child block"),
