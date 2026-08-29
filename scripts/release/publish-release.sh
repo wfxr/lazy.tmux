@@ -136,6 +136,14 @@ release_lock() {
     release_data '.[0].assets[] | select(.name == "SHA256SUMS") | [(.label // ""), .digest] | @tsv'
 }
 
+clear_checksum_label() {
+    checksum_asset_id=$(release_data '.[0].assets[] | select(.name == "SHA256SUMS") | .id') ||
+        return 1
+    [ -n "$checksum_asset_id" ] || return 1
+    gh api --method PATCH "repos/{owner}/{repo}/releases/assets/$checksum_asset_id" \
+        --raw-field 'label=' >/dev/null
+}
+
 assert_draft() {
     [ "$(release_state)" = draft ] || fail "release $tag is no longer a draft"
 }
@@ -226,6 +234,10 @@ if [ "$prerelease" = true ]; then
     gh release edit "$tag" --draft=false --prerelease --latest=false
 else
     gh release edit "$tag" --draft=false --prerelease=false
+fi
+
+if ! clear_checksum_label; then
+    echo "warning: published $tag, but SHA256SUMS retains its internal publication label" >&2
 fi
 
 trap - EXIT HUP INT TERM

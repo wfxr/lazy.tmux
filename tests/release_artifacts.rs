@@ -179,6 +179,7 @@ struct FakeGh {
     after_lock: PathBuf,
     after_archive: PathBuf,
     create_visibility_lag: PathBuf,
+    label_cleanup: PathBuf,
     log: PathBuf,
 }
 
@@ -192,6 +193,7 @@ impl FakeGh {
         let after_lock = root.join("gh-after-lock");
         let after_archive = root.join("gh-after-archive");
         let create_visibility_lag = root.join("gh-create-visibility-lag");
+        let label_cleanup = root.join("gh-label-cleanup");
         let log = root.join("gh.log");
         std::fs::create_dir(&bin_dir).unwrap();
         std::fs::write(&state, format!("{initial_state}\n")).unwrap();
@@ -201,6 +203,7 @@ impl FakeGh {
         std::fs::write(&after_lock, "none\n").unwrap();
         std::fs::write(&after_archive, "none\n").unwrap();
         std::fs::write(&create_visibility_lag, "0\n").unwrap();
+        std::fs::write(&label_cleanup, "success\n").unwrap();
 
         let gh = bin_dir.join("gh");
         std::fs::write(
@@ -225,6 +228,14 @@ printf '%s\n' "$*" >> "$FAKE_GH_LOG"
 
 case "$1:$2" in
     api:*)
+        if [ "$2:$3" = "--method:PATCH" ]; then
+            [ "$4" = "repos/{owner}/{repo}/releases/assets/1" ] || exit 2
+            [ "$(cat "$FAKE_GH_STATE")" = public ] || exit 1
+            [ "$(cat "$FAKE_GH_LABEL_CLEANUP")" = success ] || exit 1
+            echo > "$FAKE_GH_LOCK_LABEL"
+            printf '{}\n'
+            exit 0
+        fi
         case "$2" in
             */releases/tags/*)
                 [ "$(cat "$FAKE_GH_STATE")" = public ] || exit 1
@@ -256,7 +267,7 @@ case "$1:$2" in
                         if [ "$name" = SHA256SUMS ]; then
                             label=$(cat "$FAKE_GH_LOCK_LABEL")
                         fi
-                        printf '%s{"name":"%s","state":"%s","digest":"%s","label":"%s"}' \
+                        printf '%s{"id":1,"name":"%s","state":"%s","digest":"%s","label":"%s"}' \
                             "$separator" "$name" "$asset_state" "$digest" "$label"
                         separator=,
                     done < "$FAKE_GH_ASSETS"
@@ -391,6 +402,7 @@ esac
             after_lock,
             after_archive,
             create_visibility_lag,
+            label_cleanup,
             log,
         }
     }
@@ -416,6 +428,7 @@ esac
             .env("FAKE_GH_AFTER_LOCK", &self.after_lock)
             .env("FAKE_GH_AFTER_ARCHIVE", &self.after_archive)
             .env("FAKE_GH_CREATE_VISIBILITY_LAG", &self.create_visibility_lag)
+            .env("FAKE_GH_LABEL_CLEANUP", &self.label_cleanup)
             .env("GITHUB_RUN_ID", "123")
             .env("GITHUB_RUN_ATTEMPT", "1");
         command
@@ -452,6 +465,10 @@ esac
 
     fn delay_created_release_visibility(&self, queries: u32) {
         std::fs::write(&self.create_visibility_lag, format!("{queries}\n")).unwrap();
+    }
+
+    fn fail_label_cleanup(&self) {
+        std::fs::write(&self.label_cleanup, "failure\n").unwrap();
     }
 }
 
@@ -816,6 +833,42 @@ fn release_publication_stages_assets_before_making_the_release_public() {
     assert!(calls[create..upload].contains("--draft"));
     assert!(calls[create..upload].contains("--generate-notes"));
     assert!(calls[publish..].contains("--draft=false"));
+}
+
+#[test]
+fn release_publication_clears_the_internal_lock_label_after_publishing() {
+    let temp = tempfile::tempdir().unwrap();
+    let release = prepare_release_assets(temp.path());
+    let fake_gh = FakeGh::new(temp.path(), "missing");
+
+    fake_gh.publish(&release).assert().success();
+
+    assert_eq!(std::fs::read_to_string(&fake_gh.lock_label).unwrap(), "\n");
+    let calls = fake_gh.calls();
+    let publish = calls.find("release edit").expect("draft should be published");
+    let cleanup = calls
+        .find("api --method PATCH repos/{owner}/{repo}/releases/assets/1 --raw-field label=")
+        .expect("internal lock label should be cleared");
+    assert!(publish < cleanup, "label was cleared before publication:\n{calls}");
+}
+
+#[test]
+fn release_publication_warns_if_the_public_lock_label_cannot_be_cleared() {
+    let temp = tempfile::tempdir().unwrap();
+    let release = prepare_release_assets(temp.path());
+    let fake_gh = FakeGh::new(temp.path(), "missing");
+    fake_gh.fail_label_cleanup();
+
+    fake_gh.publish(&release).assert().success().stderr(predicate::str::contains(format!(
+        "warning: published {}, but SHA256SUMS retains its internal publication label",
+        package_tag()
+    )));
+
+    assert_eq!(fake_gh.state(), "public\n");
+    assert_eq!(
+        std::fs::read_to_string(&fake_gh.lock_label).unwrap(),
+        "tmup-publication-run-123-attempt-1\n"
+    );
 }
 
 #[test]
