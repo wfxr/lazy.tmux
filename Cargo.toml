@@ -1,7 +1,14 @@
 [package]
 name = "tmup"
-version = "0.2.0-rc.1"
+version = "0.3.0-rc.1"
 edition = "2024"
+description = "A modern, config-driven tmux plugin manager"
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/wfxr/tmup"
+repository = "https://github.com/wfxr/tmup"
+keywords = ["tmux", "plugin-manager", "terminal", "cli"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anstream = "1"
