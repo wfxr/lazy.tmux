@@ -14,7 +14,7 @@ fn config_mode_pure_loads_only_kdl() {
     let dir = tempdir().unwrap();
     let kdl = dir.path().join("tmup.kdl");
     let tpm = dir.path().join("tmux.conf");
-    write_file(&kdl, r#"plugin "tmux-plugins/tmux-sensible""#);
+    write_file(&kdl, r#"plug "tmux-plugins/tmux-sensible""#);
     write_file(&tpm, "set -g @plugin 'tmux-plugins/tmux-yank'\n");
 
     let loaded = load_from_sources(ConfigMode::Pure, Some(&kdl), Some(&tpm)).unwrap();
@@ -97,28 +97,28 @@ fn native_config_rejects_unsupported_plugin_syntax() {
     let dir = tempdir().unwrap();
     let kdl = dir.path().join("tmup.kdl");
     let cases = [
-        ("plugin", "plugin requires exactly one source string argument"),
-        ("plugin 42", "plugin requires exactly one source string argument"),
-        (r#"plugin "user/repo" "extra""#, "plugin requires exactly one source string argument"),
-        (r#"plugin "   ""#, "plugin source must not be empty or whitespace-only"),
-        (r#"plugin (future)"user/repo""#, "plugin source does not support KDL type annotations"),
-        (r#"(future)plugin "user/repo""#, "plugin does not support KDL type annotations"),
-        (r#"plugin "user/repo" future=#true"#, "plugin \"user/repo\": unknown property \"future\""),
+        ("plug", "plugin requires exactly one source string argument"),
+        ("plug 42", "plugin requires exactly one source string argument"),
+        (r#"plug "user/repo" "extra""#, "plugin requires exactly one source string argument"),
+        (r#"plug "   ""#, "plugin source must not be empty or whitespace-only"),
+        (r#"plug (future)"user/repo""#, "plugin source does not support KDL type annotations"),
+        (r#"(future)plug "user/repo""#, "plugin does not support KDL type annotations"),
+        (r#"plug "user/repo" future=#true"#, "plugin \"user/repo\": unknown property \"future\""),
         (
-            r#"plugin "user/repo" name=(future)"repo""#,
+            r#"plug "user/repo" name=(future)"repo""#,
             "plugin \"user/repo\": name does not support KDL type annotations",
         ),
-        (r#"plugin "user/repo" name="  ""#, "name must not be empty or whitespace-only"),
-        (r#"plugin "user/repo" branch="  ""#, "branch must not be empty or whitespace-only"),
-        (r#"plugin "user/repo" tag="  ""#, "tag must not be empty or whitespace-only"),
-        (r#"plugin "user/repo" commit="  ""#, "commit must not be empty or whitespace-only"),
-        (r#"plugin "user/repo" build="  ""#, "build must not be empty or whitespace-only"),
+        (r#"plug "user/repo" name="  ""#, "name must not be empty or whitespace-only"),
+        (r#"plug "user/repo" branch="  ""#, "branch must not be empty or whitespace-only"),
+        (r#"plug "user/repo" tag="  ""#, "tag must not be empty or whitespace-only"),
+        (r#"plug "user/repo" commit="  ""#, "commit must not be empty or whitespace-only"),
+        (r#"plug "user/repo" build="  ""#, "build must not be empty or whitespace-only"),
         (
-            r#"plugin "user/repo" { future-child "value" }"#,
+            r#"plug "user/repo" { future-child "value" }"#,
             "plugin \"user/repo\": unknown child \"future-child\"",
         ),
         (
-            r#"plugin "user/repo" { build "make install" }"#,
+            r#"plug "user/repo" { build "make install" }"#,
             "plugin \"user/repo\": unknown child \"build\"",
         ),
     ];
@@ -136,51 +136,48 @@ fn native_config_rejects_unsupported_runtime_node_syntax() {
     let kdl = dir.path().join("tmup.kdl");
     let cases = [
         (
-            r#"plugin "user/repo" { opt "key" "value" "extra" }"#,
+            r#"plug "user/repo" { opt "key" "value" "extra" }"#,
             "opt requires exactly 2 string arguments",
         ),
+        (r#"plug "user/repo" { opt "key" "value" future=#true }"#, "opt must not have properties"),
         (
-            r#"plugin "user/repo" { opt "key" "value" future=#true }"#,
-            "opt must not have properties",
-        ),
-        (
-            r#"plugin "user/repo" { (future)opt "key" "value" }"#,
+            r#"plug "user/repo" { (future)opt "key" "value" }"#,
             "opt does not support KDL type annotations",
         ),
         (
-            r#"plugin "user/repo" { opt "  " "value" }"#,
+            r#"plug "user/repo" { opt "  " "value" }"#,
             "opt key must not be empty or whitespace-only",
         ),
         (
-            r#"plugin "user/repo" { env "  " "value" }"#,
+            r#"plug "user/repo" { env "  " "value" }"#,
             "env name must not be empty or whitespace-only",
         ),
         (
-            r#"plugin "user/repo" { (future)env "NAME" "value" }"#,
+            r#"plug "user/repo" { (future)env "NAME" "value" }"#,
             "env does not support KDL type annotations",
         ),
         (
-            r#"plugin "user/repo" { bind "  " { shell "true" } }"#,
+            r#"plug "user/repo" { bind "  " { shell "true" } }"#,
             "bind key must not be empty or whitespace-only",
         ),
         (
-            r#"plugin "user/repo" { (future)bind "x" { shell "true" } }"#,
+            r#"plug "user/repo" { (future)bind "x" { shell "true" } }"#,
             "bind does not support KDL type annotations",
         ),
         (
-            r#"plugin "user/repo" { bind "x" { (future)options "-n"; shell "true" } }"#,
+            r#"plug "user/repo" { bind "x" { (future)options "-n"; shell "true" } }"#,
             "bind options does not support KDL type annotations",
         ),
         (
-            r#"plugin "user/repo" { bind "x" { options "  "; shell "true" } }"#,
+            r#"plug "user/repo" { bind "x" { options "  "; shell "true" } }"#,
             "bind option strings must not be empty or whitespace-only",
         ),
         (
-            r#"plugin "user/repo" { bind "x" { (future)shell "true" } }"#,
+            r#"plug "user/repo" { bind "x" { (future)shell "true" } }"#,
             "bind shell does not support KDL type annotations",
         ),
         (
-            "plugin \"user/repo\" { if #false {}\n(future)else {} }",
+            "plug \"user/repo\" { if #false {}\n(future)else {} }",
             "else does not support KDL type annotations",
         ),
     ];
@@ -191,7 +188,7 @@ fn native_config_rejects_unsupported_runtime_node_syntax() {
         assert!(error.to_string().contains(expected), "input={input:?}, error={error:#}");
     }
 
-    write_file(&kdl, r#"plugin "user/repo" { opt "key" ""; env "NAME" "" }"#);
+    write_file(&kdl, r#"plug "user/repo" { opt "key" ""; env "NAME" "" }"#);
     load_from_sources(ConfigMode::Pure, Some(&kdl), None)
         .expect("option and environment values may be empty");
 }
@@ -201,7 +198,7 @@ fn config_mode_mixed_merges_tpm_plugins_into_kdl() {
     let dir = tempdir().unwrap();
     let kdl = dir.path().join("tmup.kdl");
     let tpm = dir.path().join("tmux.conf");
-    write_file(&kdl, r#"plugin "tmux-plugins/tmux-sensible""#);
+    write_file(&kdl, r#"plug "tmux-plugins/tmux-sensible""#);
     write_file(&tpm, "set -g @plugin 'tmux-plugins/tmux-yank'\n");
 
     let loaded = load_from_sources(ConfigMode::Mixed, Some(&kdl), Some(&tpm)).unwrap();
@@ -241,7 +238,7 @@ fn config_mode_mixed_prefers_kdl_for_duplicate_remote_plugin() {
     let dir = tempdir().unwrap();
     let kdl = dir.path().join("tmup.kdl");
     let tpm = dir.path().join("tmux.conf");
-    write_file(&kdl, r#"plugin "tmux-plugins/tmux-sensible" branch="feature""#);
+    write_file(&kdl, r#"plug "tmux-plugins/tmux-sensible" branch="feature""#);
     write_file(&tpm, "set -g @plugin 'tmux-plugins/tmux-sensible'\n");
 
     let loaded = load_from_sources(ConfigMode::Mixed, Some(&kdl), Some(&tpm)).unwrap();
@@ -261,7 +258,7 @@ fn config_mode_mixed_deduplicates_cross_format_remote_plugin_ids() {
     let tpm = dir.path().join("tmux.conf");
     write_file(
         &kdl,
-        r#"plugin "https://github.com/tmux-plugins/tmux-sensible.git" branch="feature""#,
+        r#"plug "https://github.com/tmux-plugins/tmux-sensible.git" branch="feature""#,
     );
     write_file(&tpm, "set -g @plugin 'tmux-plugins/tmux-sensible'\n");
 
@@ -282,7 +279,7 @@ fn config_mode_mixed_keeps_kdl_local_plugins() {
     let tpm = dir.path().join("tmux.conf");
     let local = dir.path().join("local-plugin");
     std::fs::create_dir_all(&local).unwrap();
-    write_file(&kdl, &format!(r#"plugin "{}" local=#true"#, local.display()));
+    write_file(&kdl, &format!(r#"plug "{}" local=#true"#, local.display()));
     write_file(&tpm, "set -g @plugin 'tmux-plugins/tmux-sensible'\n");
 
     let loaded = load_from_sources(ConfigMode::Mixed, Some(&kdl), Some(&tpm)).unwrap();
@@ -305,7 +302,7 @@ fn config_mode_mixed_requires_kdl_source() {
 fn config_mode_mixed_allows_missing_tpm_config() {
     let dir = tempdir().unwrap();
     let kdl = dir.path().join("tmup.kdl");
-    write_file(&kdl, r#"plugin "tmux-plugins/tmux-sensible""#);
+    write_file(&kdl, r#"plug "tmux-plugins/tmux-sensible""#);
 
     let loaded = load_from_sources(ConfigMode::Mixed, Some(&kdl), None).unwrap();
 
@@ -380,11 +377,11 @@ fn enable_conditions_project_remote_and_local_declarations() {
         &kdl,
         &format!(
             r#"
-plugin "user/default"
-plugin "user/enabled" enabled=#true
-plugin "user/disabled" enabled=#false
-plugin "{}" local=#true enabled=#true
-plugin "{}" local=#true enabled=#false
+plug "user/default"
+plug "user/enabled" enabled=#true
+plug "user/disabled" enabled=#false
+plug "{}" local=#true enabled=#true
+plug "{}" local=#true enabled=#false
 "#,
             local_enabled.display(),
             local_disabled.display(),
@@ -408,11 +405,11 @@ fn load_conditions_resolve_for_enabled_remote_and_local_plugins() {
         &kdl,
         &format!(
             r#"
-plugin "user/default"
-plugin "user/false" cond=#false
-plugin "user/shell-true" cond="test -f load-marker"
-plugin "user/shell-false" cond="exit 37"
-plugin "{}" local=#true cond=#false
+plug "user/default"
+plug "user/false" cond=#false
+plug "user/shell-true" cond="test -f load-marker"
+plug "user/shell-false" cond="exit 37"
+plug "{}" local=#true cond=#false
 "#,
             local.display(),
         ),
@@ -451,7 +448,7 @@ fn runtime_configuration_selects_else_bindings_and_keeps_unconditional_bindings(
     write_file(
         &kdl,
         r#"
-plugin "user/repo" {
+plug "user/repo" {
     bind "always" { shell "./always" }
     if #false {
         bind "then" { shell "./then" }
@@ -485,7 +482,7 @@ fn runtime_configuration_shell_predicates_use_config_directory_and_short_circuit
     write_file(
         &kdl,
         r#"
-plugin "user/repo" {
+plug "user/repo" {
     if "test -f host-marker" {
         bind "host" { shell "./host" }
     }
@@ -536,7 +533,7 @@ fn invalid_runtime_configuration_branch_forms_are_rejected_before_predicates_run
         ("if #true {}\nelse { build \"make\" }", "runtime configuration branch only allows"),
         ("if #true {}\nelse { enabled #false }", "runtime configuration branch only allows"),
         ("if #true {}\nelse { cond #false }", "runtime configuration branch only allows"),
-        ("if #true {}\nelse { plugin \"other/repo\" }", "runtime configuration branch only allows"),
+        ("if #true {}\nelse { plug \"other/repo\" }", "runtime configuration branch only allows"),
         ("if #true {}\nelse { future \"value\" }", "runtime configuration branch only allows"),
         (
             "if #true {}\nelse { opt \"key\" \"value\" \"extra\" }",
@@ -549,7 +546,7 @@ fn invalid_runtime_configuration_branch_forms_are_rejected_before_predicates_run
         write_file(
             &kdl,
             &format!(
-                "plugin \"user/first\" enabled=\"touch {}\"\nplugin \"user/repo\" {{\n{branch}\n}}",
+                "plug \"user/first\" enabled=\"touch {}\"\nplug \"user/repo\" {{\n{branch}\n}}",
                 marker.display()
             ),
         );
@@ -574,7 +571,7 @@ fn runtime_configuration_allows_empty_branches() {
     write_file(
         &kdl,
         r#"
-plugin "user/repo" {
+plug "user/repo" {
     if #true {
     }
     else {
@@ -605,9 +602,9 @@ fn shell_enable_conditions_use_config_directory_and_nonzero_is_false() {
     write_file(
         &kdl,
         r#"
-plugin "user/from-cwd" enabled="test -f host-marker"
-plugin "user/status-one" enabled="exit 1"
-plugin "user/status-127" enabled="exit 127"
+plug "user/from-cwd" enabled="test -f host-marker"
+plug "user/status-one" enabled="exit 1"
+plug "user/status-127" enabled="exit 127"
 "#,
     );
 
@@ -623,7 +620,7 @@ fn mixed_mode_merges_before_evaluating_enable_conditions() {
     let dir = tempdir().unwrap();
     let kdl = dir.path().join("tmup.kdl");
     let tpm = dir.path().join("tmux.conf");
-    write_file(&kdl, r#"plugin "tmux-plugins/tmux-sensible" enabled=#false"#);
+    write_file(&kdl, r#"plug "tmux-plugins/tmux-sensible" enabled=#false"#);
     write_file(
         &tpm,
         concat!(
@@ -644,7 +641,7 @@ fn mixed_mode_preserves_tpm_order_and_applies_kdl_load_conditions_after_merge() 
     let dir = tempdir().unwrap();
     let kdl = dir.path().join("tmup.kdl");
     let tpm = dir.path().join("tmux.conf");
-    write_file(&kdl, r#"plugin "tmux-plugins/tmux-sensible" cond=#false"#);
+    write_file(&kdl, r#"plug "tmux-plugins/tmux-sensible" cond=#false"#);
     write_file(
         &tpm,
         concat!(
@@ -681,7 +678,7 @@ fn mixed_mode_projects_kdl_runtime_configuration_in_the_tpm_slot() {
     write_file(
         &kdl,
         r#"
-plugin "user/repo" branch="feature" {
+plug "user/repo" branch="feature" {
     if #false {
         bind "then" { shell "./then" }
     }
@@ -730,11 +727,11 @@ fn invalid_enable_condition_forms_are_rejected() {
     let dir = tempdir().unwrap();
     let kdl = dir.path().join("tmup.kdl");
     let cases = [
-        (r#"plugin "user/repo" enabled=42"#, "bool or shell predicate string"),
-        (r#"plugin "user/repo" enabled="""#, "must not be empty"),
-        (r#"plugin "user/repo" enabled="   ""#, "whitespace-only"),
-        (r#"plugin "user/repo" enabled=(future)#true"#, "type annotations"),
-        ("plugin \"user/repo\" { enabled { future #true } }", "enabled child form is reserved"),
+        (r#"plug "user/repo" enabled=42"#, "bool or shell predicate string"),
+        (r#"plug "user/repo" enabled="""#, "must not be empty"),
+        (r#"plug "user/repo" enabled="   ""#, "whitespace-only"),
+        (r#"plug "user/repo" enabled=(future)#true"#, "type annotations"),
+        ("plug \"user/repo\" { enabled { future #true } }", "enabled child form is reserved"),
     ];
 
     for (input, expected) in cases {
@@ -750,17 +747,17 @@ fn invalid_load_condition_forms_are_rejected_before_predicates_run() {
     let kdl = dir.path().join("tmup.kdl");
     let marker = dir.path().join("predicate-ran");
     let cases = [
-        (r#"plugin "user/repo" cond=42"#, "bool or shell predicate string"),
-        (r#"plugin "user/repo" cond="""#, "must not be empty"),
-        (r#"plugin "user/repo" cond="   ""#, "whitespace-only"),
-        (r#"plugin "user/repo" cond=(future)#true"#, "type annotations"),
-        ("plugin \"user/repo\" { cond { future #true } }", "cond child form is reserved"),
+        (r#"plug "user/repo" cond=42"#, "bool or shell predicate string"),
+        (r#"plug "user/repo" cond="""#, "must not be empty"),
+        (r#"plug "user/repo" cond="   ""#, "whitespace-only"),
+        (r#"plug "user/repo" cond=(future)#true"#, "type annotations"),
+        ("plug \"user/repo\" { cond { future #true } }", "cond child form is reserved"),
     ];
 
     for (input, expected) in cases {
         write_file(
             &kdl,
-            &format!("plugin \"user/first\" enabled=\"touch {}\"\n{input}", marker.display()),
+            &format!("plug \"user/first\" enabled=\"touch {}\"\n{input}", marker.display()),
         );
         let error = load_from_sources(ConfigMode::Pure, Some(&kdl), None).unwrap_err();
         assert!(error.to_string().contains(expected), "input={input:?}, error={error:#}");
@@ -772,7 +769,7 @@ fn invalid_load_condition_forms_are_rejected_before_predicates_run() {
 fn managed_state_resolution_does_not_evaluate_load_conditions() {
     let dir = tempdir().unwrap();
     let kdl = dir.path().join("tmup.kdl");
-    write_file(&kdl, r#"plugin "user/repo" cond="kill -TERM $$""#);
+    write_file(&kdl, r#"plug "user/repo" cond="kill -TERM $$""#);
 
     let loaded = load_from_sources(ConfigMode::Pure, Some(&kdl), None).unwrap();
 
@@ -786,10 +783,10 @@ fn repeated_known_plugin_values_are_rejected() {
     let dir = tempdir().unwrap();
     let kdl = dir.path().join("tmup.kdl");
     let cases = [
-        r#"plugin "user/repo" enabled=#true enabled=#false"#,
-        r#"plugin "user/repo" cond=#true cond=#false"#,
-        r#"plugin "user/repo" name="one" name="two""#,
-        r#"plugin "user/repo" build="one" build="two""#,
+        r#"plug "user/repo" enabled=#true enabled=#false"#,
+        r#"plug "user/repo" cond=#true cond=#false"#,
+        r#"plug "user/repo" name="one" name="two""#,
+        r#"plug "user/repo" build="one" build="two""#,
     ];
 
     for input in cases {
@@ -807,8 +804,8 @@ fn every_declaration_is_validated_before_enable_conditions_run() {
     write_file(
         &kdl,
         r#"
-plugin "user/first" enabled="touch predicate-ran"
-plugin "user/invalid" branch=42 enabled=#false
+plug "user/first" enabled="touch predicate-ran"
+plug "user/invalid" branch=42 enabled=#false
 "#,
     );
 
@@ -825,8 +822,8 @@ fn disabled_declarations_still_participate_in_identity_validation() {
     write_file(
         &kdl,
         r#"
-plugin "user/repo" enabled=#false
-plugin "https://github.com/user/repo.git" enabled=#true
+plug "user/repo" enabled=#false
+plug "https://github.com/user/repo.git" enabled=#true
 "#,
     );
 
@@ -841,7 +838,7 @@ fn timed_out_predicate_cannot_leave_descendants_running() {
     let dir = tempdir().unwrap();
     let kdl = dir.path().join("tmup.kdl");
     let marker = dir.path().join("descendant-survived");
-    write_file(&kdl, r#"plugin "user/repo" enabled="(sleep 6; touch descendant-survived) & wait""#);
+    write_file(&kdl, r#"plug "user/repo" enabled="(sleep 6; touch descendant-survived) & wait""#);
 
     let error = load_from_sources(ConfigMode::Pure, Some(&kdl), None).unwrap_err();
     assert!(error.to_string().contains("timed out after 5 seconds"), "{error:#}");

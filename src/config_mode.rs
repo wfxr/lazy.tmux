@@ -456,7 +456,7 @@ fn create_default_tmup_config(path: &Path) -> Result<()> {
 fn default_tmup_config_template() -> &'static str {
     r#"// tmup configuration
 // Add plugins here, for example:
-// plugin "tmux-plugins/tmux-sensible"
+// plug "tmux-plugins/tmux-sensible"
 //
 // If you are migrating from TPM, you can set:
 // TMUP_CONFIG_MODE=mixed
@@ -481,10 +481,10 @@ mod tests {
     fn create_default_tmup_config_does_not_overwrite_existing_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("tmup.kdl");
-        std::fs::write(&path, "plugin \"user/custom\"\n").unwrap();
+        std::fs::write(&path, "plug \"user/custom\"\n").unwrap();
 
         super::create_default_tmup_config(&path).unwrap();
 
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "plugin \"user/custom\"\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "plug \"user/custom\"\n");
     }
 }

@@ -7,97 +7,88 @@ use tmup::config_mode::{
 };
 
 pub const MALFORMED_ENVIRONMENT_NODES: &[(&str, &str)] = &[
-    (r#"plugin "user/repo" { env "NAME" }"#, "exactly 2 string arguments"),
-    (r#"plugin "user/repo" { env "NAME" "value" "extra" }"#, "exactly 2 string arguments"),
-    (r#"plugin "user/repo" { env 42 "value" }"#, "arguments must be strings"),
-    (r#"plugin "user/repo" { env "NAME" #true }"#, "arguments must be strings"),
-    (r#"plugin "user/repo" { env "" "value" }"#, "env name must not be empty"),
-    (r#"plugin "user/repo" { unset-env }"#, "exactly 1 string argument"),
-    (r#"plugin "user/repo" { unset-env "" }"#, "unset-env name must not be empty"),
-    (r#"plugin "user/repo" { unset-env 42 }"#, "arguments must be strings"),
-    (r#"plugin "user/repo" { env "NAME" "value" future=#true }"#, "must not have properties"),
-    (
-        r#"plugin "user/repo" { env (future)"NAME" "value" }"#,
-        "does not support KDL type annotations",
-    ),
-    ("plugin \"user/repo\" { unset-env \"NAME\" { future #true } }", "must not have child nodes"),
+    (r#"plug "user/repo" { env "NAME" }"#, "exactly 2 string arguments"),
+    (r#"plug "user/repo" { env "NAME" "value" "extra" }"#, "exactly 2 string arguments"),
+    (r#"plug "user/repo" { env 42 "value" }"#, "arguments must be strings"),
+    (r#"plug "user/repo" { env "NAME" #true }"#, "arguments must be strings"),
+    (r#"plug "user/repo" { env "" "value" }"#, "env name must not be empty"),
+    (r#"plug "user/repo" { unset-env }"#, "exactly 1 string argument"),
+    (r#"plug "user/repo" { unset-env "" }"#, "unset-env name must not be empty"),
+    (r#"plug "user/repo" { unset-env 42 }"#, "arguments must be strings"),
+    (r#"plug "user/repo" { env "NAME" "value" future=#true }"#, "must not have properties"),
+    (r#"plug "user/repo" { env (future)"NAME" "value" }"#, "does not support KDL type annotations"),
+    ("plug \"user/repo\" { unset-env \"NAME\" { future #true } }", "must not have child nodes"),
 ];
 
 pub const MALFORMED_BINDING_NODES: &[(&str, &str)] = &[
-    (r#"plugin "user/repo" { bind { shell "true" } }"#, "exactly 1 key string argument"),
+    (r#"plug "user/repo" { bind { shell "true" } }"#, "exactly 1 key string argument"),
+    (r#"plug "user/repo" { bind "x" "extra" { shell "true" } }"#, "exactly 1 key string argument"),
+    (r#"plug "user/repo" { bind 42 { shell "true" } }"#, "key must be a string"),
+    (r#"plug "user/repo" { bind "" { shell "true" } }"#, "key must not be empty"),
     (
-        r#"plugin "user/repo" { bind "x" "extra" { shell "true" } }"#,
-        "exactly 1 key string argument",
-    ),
-    (r#"plugin "user/repo" { bind 42 { shell "true" } }"#, "key must be a string"),
-    (r#"plugin "user/repo" { bind "" { shell "true" } }"#, "key must not be empty"),
-    (
-        r#"plugin "user/repo" { bind "x" future=#true { shell "true" } }"#,
+        r#"plug "user/repo" { bind "x" future=#true { shell "true" } }"#,
         "bind must not have properties",
     ),
     (
-        r#"plugin "user/repo" { bind (future)"x" { shell "true" } }"#,
+        r#"plug "user/repo" { bind (future)"x" { shell "true" } }"#,
         "bind does not support KDL type annotations",
     ),
-    (r#"plugin "user/repo" { bind "x" }"#, "bind requires a child block"),
-    (r#"plugin "user/repo" { bind "x" { options; shell "true" } }"#, "at least 1"),
+    (r#"plug "user/repo" { bind "x" }"#, "bind requires a child block"),
+    (r#"plug "user/repo" { bind "x" { options; shell "true" } }"#, "at least 1"),
     (
-        r#"plugin "user/repo" { bind "x" { options ""; shell "true" } }"#,
+        r#"plug "user/repo" { bind "x" { options ""; shell "true" } }"#,
         "option strings must not be empty",
     ),
     (
-        r#"plugin "user/repo" { bind "x" { options "-n" 42; shell "true" } }"#,
+        r#"plug "user/repo" { bind "x" { options "-n" 42; shell "true" } }"#,
         "options must be strings",
     ),
     (
-        r#"plugin "user/repo" { bind "x" { options "-n"; options "-r"; shell "true" } }"#,
+        r#"plug "user/repo" { bind "x" { options "-n"; options "-r"; shell "true" } }"#,
         "options child may only be specified once",
     ),
     (
-        r#"plugin "user/repo" { bind "x" { options "-n" future=#true; shell "true" } }"#,
+        r#"plug "user/repo" { bind "x" { options "-n" future=#true; shell "true" } }"#,
         "options must not have properties",
     ),
     (
-        r#"plugin "user/repo" { bind "x" { options (future)"-n"; shell "true" } }"#,
+        r#"plug "user/repo" { bind "x" { options (future)"-n"; shell "true" } }"#,
         "options does not support KDL type annotations",
     ),
     (
-        "plugin \"user/repo\" { bind \"x\" { options \"-n\" { future #true }; shell \"true\" } }",
+        "plug \"user/repo\" { bind \"x\" { options \"-n\" { future #true }; shell \"true\" } }",
         "options must not have child nodes",
     ),
-    (r#"plugin "user/repo" { bind "x" { options "-n" } }"#, "exactly one shell child"),
+    (r#"plug "user/repo" { bind "x" { options "-n" } }"#, "exactly one shell child"),
+    (r#"plug "user/repo" { bind "x" { shell "true"; shell "false" } }"#, "exactly one shell child"),
     (
-        r#"plugin "user/repo" { bind "x" { shell "true"; shell "false" } }"#,
-        "exactly one shell child",
-    ),
-    (
-        r#"plugin "user/repo" { bind "x" { shell "true" "extra" } }"#,
+        r#"plug "user/repo" { bind "x" { shell "true" "extra" } }"#,
         "shell requires exactly 1 command string",
     ),
-    (r#"plugin "user/repo" { bind "x" { shell 42 } }"#, "shell command must be a string"),
-    (r#"plugin "user/repo" { bind "x" { shell "   " } }"#, "empty or whitespace-only"),
-    (r#"plugin "user/repo" { bind "x" { shell "true" future=#true } }"#, "unknown shell property"),
+    (r#"plug "user/repo" { bind "x" { shell 42 } }"#, "shell command must be a string"),
+    (r#"plug "user/repo" { bind "x" { shell "   " } }"#, "empty or whitespace-only"),
+    (r#"plug "user/repo" { bind "x" { shell "true" future=#true } }"#, "unknown shell property"),
     (
-        r#"plugin "user/repo" { bind "x" { shell "true" background="yes" } }"#,
+        r#"plug "user/repo" { bind "x" { shell "true" background="yes" } }"#,
         "background must be a bool",
     ),
     (
-        r#"plugin "user/repo" { bind "x" { shell "true" background=#true background=#false } }"#,
+        r#"plug "user/repo" { bind "x" { shell "true" background=#true background=#false } }"#,
         "background may only be specified once",
     ),
     (
-        r#"plugin "user/repo" { bind "x" { shell "true" background=(future)#true } }"#,
+        r#"plug "user/repo" { bind "x" { shell "true" background=(future)#true } }"#,
         "background does not support KDL type annotations",
     ),
     (
-        r#"plugin "user/repo" { bind "x" { shell (future)"true" } }"#,
+        r#"plug "user/repo" { bind "x" { shell (future)"true" } }"#,
         "shell does not support KDL type annotations",
     ),
     (
-        "plugin \"user/repo\" { bind \"x\" { shell \"true\" { future #true } } }",
+        "plug \"user/repo\" { bind \"x\" { shell \"true\" { future #true } } }",
         "shell must not have child nodes",
     ),
-    (r#"plugin "user/repo" { bind "x" { future "value"; shell "true" } }"#, "unknown bind child"),
+    (r#"plug "user/repo" { bind "x" { future "value"; shell "true" } }"#, "unknown bind child"),
 ];
 
 pub fn write_file(path: &Path, content: &str) {

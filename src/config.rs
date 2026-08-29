@@ -58,7 +58,7 @@ pub(crate) fn parse_config_document(input: &str) -> Result<ParsedConfig> {
                 ensure!(options.is_none(), "options may only be specified once");
                 options = Some(parse_options(node)?);
             }
-            "plugin" => plugins.push(parse_plugin(node)?),
+            "plug" => plugins.push(parse_plugin(node)?),
             unknown => bail!("unknown root node \"{unknown}\""),
         }
     }

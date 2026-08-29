@@ -193,9 +193,9 @@ options {
     concurrency 16
 }
 
-plugin "tmux-plugins/tmux-sensible"
-plugin "tmux-plugins/tmux-yank"
-plugin "catppuccin/tmux" opt-prefix="catppuccin_" {
+plug "tmux-plugins/tmux-sensible"
+plug "tmux-plugins/tmux-yank"
+plug "catppuccin/tmux" opt-prefix="catppuccin_" {
     opt "flavor" "mocha"
 }
 EOF
@@ -232,7 +232,7 @@ does not exist yet. Read-only commands such as `list` do not create it. When
 `tmup.lock` lives next to the active `tmup.kdl`.
 
 Native `tmup.kdl` uses a closed grammar. The document root accepts at most one
-`options` node and any number of `plugin` nodes, in any order. Unknown nodes,
+`options` node and any number of `plug` nodes, in any order. Unknown nodes,
 properties, extra arguments, duplicate scalar declarations, unsupported child
 blocks, and KDL type annotations are configuration errors. Every command
 validates the complete document before evaluating predicates or changing
@@ -265,25 +265,25 @@ options {
 }
 
 // GitHub shorthand — track default branch
-plugin "tmux-plugins/tmux-sensible"
+plug "tmux-plugins/tmux-sensible"
 
 // Pin to a tag — update skips pinned plugins
-plugin "tmux-plugins/tmux-yank" tag="v2.3"
+plug "tmux-plugins/tmux-yank" tag="v2.3"
 
 // Branch + build command + options
-plugin "tmux-plugins/tmux-resurrect" branch="master" build="make install" {
+plug "tmux-plugins/tmux-resurrect" branch="master" build="make install" {
     opt "resurrect-strategy-vim" "session"
     opt "resurrect-save-bash-history" "on"
 }
 
 // opt-prefix avoids repetition: opt "flavor" → @catppuccin_flavor
-plugin "catppuccin/tmux" opt-prefix="catppuccin_" {
+plug "catppuccin/tmux" opt-prefix="catppuccin_" {
     opt "flavor" "mocha"
     opt "window_text" "#W"
 }
 
 // Configure the tmux global environment before plugin scripts run
-plugin "wfxr/tmux-fzf" {
+plug "wfxr/tmux-fzf" {
     env "TMUX_FZF_LAUNCH_KEY" "C-f"
     env "TMUX_FZF_OPTIONS" "-p -w 62% -h 38% -m --border=none"
     unset-env "OLD_TMUX_FZF_OPTION"
@@ -300,19 +300,19 @@ plugin "wfxr/tmux-fzf" {
 }
 
 // Non-GitHub source
-plugin "https://gitlab.com/user/my-plugin.git"
+plug "https://gitlab.com/user/my-plugin.git"
 
 // Local plugin — loaded in-place, not in the lock snapshot
-plugin "~/dev/my-tmux-plugin" local=#true name="my-plugin-dev"
+plug "~/dev/my-tmux-plugin" local=#true name="my-plugin-dev"
 
 // Manage this plugin only on one stable execution host
-plugin "company/workstation-tools" enabled=#"test "$(hostname)" = workstation"#
+plug "company/workstation-tools" enabled=#"test "$(hostname)" = workstation"#
 
 // Keep this plugin managed, but load it only in SSH environments
-plugin "company/remote-tools" cond=#"[ -n "$SSH_CLIENT" ]"#
+plug "company/remote-tools" cond=#"[ -n "$SSH_CLIENT" ]"#
 
 // Disable with KDL slashdash
-/-plugin "tmux-plugins/tmux-continuum"
+/-plug "tmux-plugins/tmux-continuum"
 ```
 
 ### Options reference
@@ -394,7 +394,7 @@ Each `bind` block requires exactly one `shell` child and accepts at most one
 `options` child:
 
 ```kdl
-plugin "wfxr/tmux-fzf" {
+plug "wfxr/tmux-fzf" {
     bind "C-w" {
         options "-n" "-r" "-T" "root"
         shell "scripts/session.sh attach | tee \"$TMUX_FZF_LOG\"" background=#true
@@ -440,10 +440,10 @@ shell predicate string:
 
 ```kdl
 // Exclude this plugin from the effective spec on other hosts.
-plugin "company/workstation-tools" enabled=#"test "$(hostname)" = workstation"#
+plug "company/workstation-tools" enabled=#"test "$(hostname)" = workstation"#
 
 // Keep this plugin managed, but load only in an SSH environment.
-plugin "company/remote-tools" cond=#"[ -n "$SSH_CLIENT" ]"#
+plug "company/remote-tools" cond=#"[ -n "$SSH_CLIENT" ]"#
 ```
 
 `enabled=#false` excludes the plugin from the Effective Plugin Specification.

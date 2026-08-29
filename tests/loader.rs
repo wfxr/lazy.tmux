@@ -33,7 +33,7 @@ fn loader_applies_setup_then_runs_tmux_files_in_order() {
     let config = resolve_config(
         dir.path(),
         r##"
-plugin "user/plugin-a" opt-prefix="pa_" {
+plug "user/plugin-a" opt-prefix="pa_" {
     opt "theme" "dark"
 }
     "##,
@@ -85,8 +85,8 @@ fn loader_preserves_plugin_declaration_order() {
     let config = resolve_config(
         dir.path(),
         r#"
-plugin "user/plugin-a"
-plugin "user/plugin-b"
+plug "user/plugin-a"
+plug "user/plugin-b"
     "#,
     );
 
@@ -119,8 +119,8 @@ fn loader_attributes_each_plugin_command_to_its_plugin() {
     let config = resolve_config(
         dir.path(),
         r#"
-plugin "user/plugin-a" { env "PLUGIN_A" "yes" }
-plugin "user/plugin-b" { env "PLUGIN_B" "yes" }
+plug "user/plugin-a" { env "PLUGIN_A" "yes" }
+plug "user/plugin-b" { env "PLUGIN_B" "yes" }
 "#,
     );
 
@@ -162,7 +162,7 @@ fn loader_applies_plugin_setup_before_loading_any_scripts() {
     let config = resolve_config(
         dir.path(),
         r##"
-plugin "user/plugin-a" opt-prefix="a_" {
+plug "user/plugin-a" opt-prefix="a_" {
     env "SHARED" "first"
     unset-env "LEGACY"
     opt "mode" "one"
@@ -174,7 +174,7 @@ plugin "user/plugin-a" opt-prefix="a_" {
         shell "./override"
     }
 }
-plugin "user/plugin-b" opt-prefix="b_" {
+plug "user/plugin-b" opt-prefix="b_" {
     env "SHARED" "second"
     opt "mode" "two"
     bind "M-b" {
@@ -241,7 +241,7 @@ fn loader_phases_selected_runtime_configuration_in_source_order() {
     std::fs::write(
         &kdl,
         r#"
-plugin "user/plugin" opt-prefix="p_" {
+plug "user/plugin" opt-prefix="p_" {
     env "OUTSIDE_BEFORE" "one"
     opt "outside_before" "one"
     bind "outside-before" { shell "./outside-before" }
@@ -328,7 +328,7 @@ fn loader_handles_missing_plugin_dir() {
     let plugin_root = dir.path().join("plugins");
     // Don't create any plugin directories
 
-    let config = resolve_config(dir.path(), r#"plugin "user/missing""#);
+    let config = resolve_config(dir.path(), r#"plug "user/missing""#);
     let plan = build_load_plan(config.runtime_configuration().unwrap(), &plugin_root);
 
     assert!(plan.plugin_commands.is_empty());
@@ -344,7 +344,7 @@ fn loader_applies_opt_prefix() {
     let config = resolve_config(
         dir.path(),
         r##"
-plugin "catppuccin/tmux" opt-prefix="catppuccin_" {
+plug "catppuccin/tmux" opt-prefix="catppuccin_" {
     opt "flavor" "mocha"
     opt "window_text" "#W"
 }
@@ -385,14 +385,14 @@ fn loader_skips_options_and_scripts_for_plugins_without_load_eligibility() {
     let config = resolve_config(
         dir.path(),
         r#"
-plugin "user/load-first" opt-prefix="first_" { opt "mode" "yes" }
-plugin "user/skip" cond=#false opt-prefix="skip_" {
+plug "user/load-first" opt-prefix="first_" { opt "mode" "yes" }
+plug "user/skip" cond=#false opt-prefix="skip_" {
     env "SKIP_ENV" "no"
     unset-env "SKIP_UNSET"
     opt "mode" "no"
     bind "skip" { shell "./skip" }
 }
-plugin "user/load-last" opt-prefix="last_" { opt "mode" "yes" }
+plug "user/load-last" opt-prefix="last_" { opt "mode" "yes" }
 "#,
     );
 

@@ -88,8 +88,8 @@ fn list_returns_state_and_build_status() {
 
     let config = parse_config(
         r#"
-plugin "user/repo-a"
-plugin "user/repo-b" build="make"
+plug "user/repo-a"
+plug "user/repo-b" build="make"
     "#,
     )
     .unwrap();
@@ -124,7 +124,7 @@ fn clean_removes_undeclared_plugins() {
     paths.ensure_dirs().unwrap();
 
     // Declared: only repo-a
-    let config = parse_config(r#"plugin "user/repo-a""#).unwrap();
+    let config = parse_config(r#"plug "user/repo-a""#).unwrap();
 
     // Installed: repo-a and repo-b
     let plugin_a = paths.plugin_dir("github.com/user/repo-a");
@@ -144,7 +144,7 @@ fn clean_does_not_remove_local_plugin_source() {
     let paths = Paths::for_test(dir.path().join("data"), dir.path().join("state"));
     paths.ensure_dirs().unwrap();
 
-    let config = parse_config(r#"plugin "~/dev/my-plugin" local=#true"#).unwrap();
+    let config = parse_config(r#"plug "~/dev/my-plugin" local=#true"#).unwrap();
 
     // Local plugin source is not in the managed directory, so clean should not touch it
     plugin::clean(&config, &paths).unwrap();
@@ -436,7 +436,7 @@ fn list_shows_broken_for_dir_without_git() {
     let paths = Paths::for_test(dir.path().join("data"), dir.path().join("state"));
     paths.ensure_dirs().unwrap();
 
-    let config = parse_config(r#"plugin "user/repo""#).unwrap();
+    let config = parse_config(r#"plug "user/repo""#).unwrap();
     let mut lock = LockFile::new();
     lock.plugins.insert("github.com/user/repo".into(), LockEntry::branch("main", "abc123"));
 
@@ -455,7 +455,7 @@ fn list_shows_broken_for_empty_dotgit() {
     let paths = Paths::for_test(dir.path().join("data"), dir.path().join("state"));
     paths.ensure_dirs().unwrap();
 
-    let config = parse_config(r#"plugin "user/repo""#).unwrap();
+    let config = parse_config(r#"plug "user/repo""#).unwrap();
     let lock = LockFile::new();
 
     // Create target dir with empty .git/ — HEAD unreadable
@@ -468,14 +468,14 @@ fn list_shows_broken_for_empty_dotgit() {
 
 #[test]
 fn update_skips_pinned_tag() {
-    let config = parse_config(r#"plugin "user/repo" tag="v1.0""#).unwrap();
+    let config = parse_config(r#"plug "user/repo" tag="v1.0""#).unwrap();
     let spec = &config.plugins[0];
     assert!(matches!(spec.tracking, tmup::model::Tracking::Tag(_)));
 }
 
 #[test]
 fn update_skips_pinned_commit() {
-    let config = parse_config(r#"plugin "user/repo" commit="abc123""#).unwrap();
+    let config = parse_config(r#"plug "user/repo" commit="abc123""#).unwrap();
     let spec = &config.plugins[0];
     assert!(matches!(spec.tracking, tmup::model::Tracking::Commit(_)));
 }
@@ -486,7 +486,7 @@ fn list_shows_both_state_and_build_status_for_build_failure() {
     let paths = Paths::for_test(dir.path().join("data"), dir.path().join("state"));
     paths.ensure_dirs().unwrap();
 
-    let config = parse_config(r#"plugin "user/repo" build="make""#).unwrap();
+    let config = parse_config(r#"plug "user/repo" build="make""#).unwrap();
     let mut lock = LockFile::new();
     lock.plugins.insert("github.com/user/repo".into(), LockEntry::branch("main", "abc123"));
 
@@ -514,7 +514,7 @@ fn list_shows_both_state_and_build_status_for_build_failure() {
 
 #[test]
 fn stale_lock_detection_catches_missing_and_mismatched_sync_metadata() {
-    let config = parse_config(r#"plugin "user/repo" build="make install""#).unwrap();
+    let config = parse_config(r#"plug "user/repo" build="make install""#).unwrap();
 
     let mut stale_lock = LockFile::new();
     stale_lock.plugins.insert("github.com/user/repo".into(), LockEntry::branch("main", "abc123"));

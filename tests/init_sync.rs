@@ -357,7 +357,7 @@ fn public_init_processes_serialize_through_tmux_loading() {
     std::fs::create_dir_all(&plugin_dir).unwrap();
     std::fs::write(plugin_dir.join("init.tmux"), "#!/bin/sh\n").unwrap();
     let config_path = dir.path().join("tmup.kdl");
-    std::fs::write(&config_path, format!(r#"plugin "{}" local=#true"#, plugin_dir.display()))
+    std::fs::write(&config_path, format!(r#"plug "{}" local=#true"#, plugin_dir.display()))
         .unwrap();
     let (fake_tmux_dir, handshake) = write_lock_probe_tmux(dir.path());
     let path = format!("{}:{}", fake_tmux_dir.display(), std::env::var("PATH").unwrap_or_default());
@@ -420,7 +420,7 @@ fn public_init_applies_literal_environment_operations_before_all_plugin_scripts(
         format!(
             r#"
 options {{ auto-install #true }}
-plugin "https://example.com/test/plugin.git" opt-prefix="remote_" {{
+plug "https://example.com/test/plugin.git" opt-prefix="remote_" {{
     env "SHARED" "remote"
     env "LITERAL" "$HOME ~ ${{PLUGIN_DIR}}"
     unset-env "STALE"
@@ -431,7 +431,7 @@ plugin "https://example.com/test/plugin.git" opt-prefix="remote_" {{
         shell "scripts/session.sh attach | tee \"$TMUX_FZF_LOG\""
     }}
 }}
-plugin "$LOCAL_PLUGIN" local=#true opt-prefix="local_" {{
+plug "$LOCAL_PLUGIN" local=#true opt-prefix="local_" {{
     env "SHARED" "local"
     unset-env "SHARED"
     env "SHARED" ""
@@ -441,11 +441,11 @@ plugin "$LOCAL_PLUGIN" local=#true opt-prefix="local_" {{
         shell "./launch > \"$OUTPUT\"" background=#true
     }}
 }}
-plugin "{skipped_plugin}" local=#true cond=#false {{
+plug "{skipped_plugin}" local=#true cond=#false {{
     env "SKIPPED" "no"
     bind "skipped" {{ shell "false" }}
 }}
-plugin "user/disabled" enabled=#false {{
+plug "user/disabled" enabled=#false {{
     env "DISABLED" "no"
     bind "disabled" {{ shell "false" }}
 }}
@@ -593,7 +593,7 @@ fn public_init_isolates_each_plugin_attributable_tmux_failure() {
             &config_path,
             format!(
                 r#"
-plugin "{}" local=#true opt-prefix="a_" {{
+plug "{}" local=#true opt-prefix="a_" {{
     env "A_BEFORE" "yes"
     env "A_FAIL_ENV" "yes"
     env "A_AFTER_ENV" "yes"
@@ -603,7 +603,7 @@ plugin "{}" local=#true opt-prefix="a_" {{
     bind "A-fail" {{ shell "true" }}
     bind "A-after" {{ shell "true" }}
 }}
-plugin "{}" local=#true opt-prefix="b_" {{
+plug "{}" local=#true opt-prefix="b_" {{
     env "B_ENV" "yes"
     opt "ok" "yes"
     bind "B-ok" {{ shell "true" }}
@@ -665,7 +665,7 @@ fn public_init_omits_failed_remote_reconciliation_without_replacing_working_stat
         &config_path,
         r#"
 options { auto-install #true }
-plugin "https://example.com/test/plugin.git" build="printf old > built-version"
+plug "https://example.com/test/plugin.git" build="printf old > built-version"
 "#,
     )
     .unwrap();
@@ -687,12 +687,12 @@ plugin "https://example.com/test/plugin.git" build="printf old > built-version"
         format!(
             r#"
 options {{ auto-install #true }}
-plugin "https://example.com/test/plugin.git" build="printf new > built-version; exit 41" opt-prefix="remote_" {{
+plug "https://example.com/test/plugin.git" build="printf new > built-version; exit 41" opt-prefix="remote_" {{
     env "REMOTE_ENV" "must-not-load"
     opt "mode" "must-not-load"
     bind "REMOTE-bind" {{ shell "true" }}
 }}
-plugin "{}" local=#true opt-prefix="neighbor_" {{
+plug "{}" local=#true opt-prefix="neighbor_" {{
     env "NEIGHBOR_ENV" "loaded"
     opt "mode" "loaded"
     bind "NEIGHBOR-bind" {{ shell "true" }}
@@ -778,7 +778,7 @@ fn public_init_omits_remote_runtime_configuration_after_preparation_failure() {
         &config_path,
         r#"
 options { auto-install #true }
-plugin "https://example.com/test/plugin.git"
+plug "https://example.com/test/plugin.git"
 "#,
     )
     .unwrap();
@@ -803,12 +803,12 @@ plugin "https://example.com/test/plugin.git"
         format!(
             r#"
 options {{ auto-install #true }}
-plugin "https://example.com/test/plugin.git" branch="missing" opt-prefix="remote_" {{
+plug "https://example.com/test/plugin.git" branch="missing" opt-prefix="remote_" {{
     env "REMOTE_ENV" "must-not-load"
     opt "mode" "must-not-load"
     bind "REMOTE-bind" {{ shell "true" }}
 }}
-plugin "{}" local=#true opt-prefix="neighbor_" {{
+plug "{}" local=#true opt-prefix="neighbor_" {{
     env "NEIGHBOR_ENV" "loaded"
     opt "mode" "loaded"
     bind "NEIGHBOR-bind" {{ shell "true" }}
@@ -862,15 +862,15 @@ fn public_init_aggregates_plugin_failures_but_keeps_global_setup_failure_operati
         &config_path,
         format!(
             r#"
-plugin "{}" local=#true {{
+plug "{}" local=#true {{
     env "A_FAIL_ENV" "yes"
     env "A_AFTER" "no"
 }}
-plugin "{}" local=#true {{
+plug "{}" local=#true {{
     env "B_FAIL_ENV" "yes"
     env "B_AFTER" "no"
 }}
-plugin "{}" local=#true {{
+plug "{}" local=#true {{
     env "C_CONTINUES" "yes"
 }}
 "#,
@@ -952,7 +952,7 @@ fn public_init_rejects_malformed_integration_nodes_before_tmux_loading_or_state_
 fn public_init_hard_condition_error_precedes_managed_directory_creation() {
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("config/tmux/tmup.kdl");
-    write_file(&config_path, r#"plugin "user/repo" enabled="kill -TERM $$""#);
+    write_file(&config_path, r#"plug "user/repo" enabled="kill -TERM $$""#);
     let path = std::env::var("PATH").unwrap_or_default();
 
     let output = public_init_command(&config_path, dir.path(), &path).output().unwrap();
@@ -983,7 +983,7 @@ fn public_init_hard_condition_error_precedes_managed_directory_creation() {
 fn public_init_hard_load_condition_error_precedes_managed_directory_creation() {
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("config/tmux/tmup.kdl");
-    write_file(&config_path, r#"plugin "user/repo" cond="kill -TERM $$""#);
+    write_file(&config_path, r#"plug "user/repo" cond="kill -TERM $$""#);
     let path = std::env::var("PATH").unwrap_or_default();
 
     let output = public_init_command(&config_path, dir.path(), &path).output().unwrap();
@@ -1021,7 +1021,7 @@ fn public_init_hard_runtime_branch_error_precedes_remote_install_and_tmux_loadin
         &config_path,
         r#"
 options { auto-install #true }
-plugin "https://example.com/test/plugin.git" {
+plug "https://example.com/test/plugin.git" {
     if "kill -TERM $$" {
         bind "unreachable" { shell "./unreachable" }
     }
@@ -1063,7 +1063,7 @@ fn public_init_does_not_advance_a_locked_remote_revision() {
     let config_path = dir.path().join("tmup.kdl");
     std::fs::write(
         &config_path,
-        "options { auto-install #true }\nplugin \"https://example.com/test/plugin.git\"\n",
+        "options { auto-install #true }\nplug \"https://example.com/test/plugin.git\"\n",
     )
     .unwrap();
     let fake_tmux_dir = write_inline_tmux(dir.path());

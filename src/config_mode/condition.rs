@@ -305,9 +305,9 @@ mod tests {
     fn projects_shell_conditions_once_in_declaration_order() {
         let parsed = crate::config::parse_config_document(
             r#"
-plugin "user/first" enabled="first"
-plugin "user/second" enabled=#true
-plugin "user/third" enabled="third"
+plug "user/first" enabled="first"
+plug "user/second" enabled=#true
+plug "user/third" enabled="third"
 "#,
         )
         .unwrap();
@@ -339,7 +339,7 @@ plugin "user/third" enabled="third"
 
         for (outcome, expected) in cases {
             let parsed =
-                crate::config::parse_config_document(r#"plugin "user/repo" enabled="predicate""#)
+                crate::config::parse_config_document(r#"plug "user/repo" enabled="predicate""#)
                     .unwrap();
             let process = FakeProcess::new([outcome]);
 
@@ -359,9 +359,9 @@ plugin "user/third" enabled="third"
     fn resolves_enable_phase_before_load_phase_and_short_circuits_disabled_plugins() {
         let parsed = crate::config::parse_config_document(
             r#"
-plugin "user/first" enabled="enable-first" cond="load-first"
-plugin "user/disabled" enabled="enable-disabled" cond="must-not-run"
-plugin "user/third" enabled="enable-third" cond="load-third"
+plug "user/first" enabled="enable-first" cond="load-first"
+plug "user/disabled" enabled="enable-disabled" cond="must-not-run"
+plug "user/third" enabled="enable-third" cond="load-third"
 "#,
         )
         .unwrap();
@@ -404,7 +404,7 @@ plugin "user/third" enabled="enable-third" cond="load-third"
 
         for (outcome, expected) in cases {
             let parsed =
-                crate::config::parse_config_document(r#"plugin "user/repo" cond="predicate""#)
+                crate::config::parse_config_document(r#"plug "user/repo" cond="predicate""#)
                     .unwrap();
             let process = FakeProcess::new([outcome]);
 

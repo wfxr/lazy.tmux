@@ -1092,7 +1092,7 @@ mod tests {
     async fn deferred_session_hosts_child_when_ui_becomes_available() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
-        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        write_config(&context, r#"plug "https://example.com/test/plugin.git""#);
         let continuation = Continuation::DeferredBootstrap(context.clone());
         let mut tmux = MockTmux::hosted();
 
@@ -1117,7 +1117,7 @@ mod tests {
     async fn resumed_bootstrap_reuses_its_session_for_the_ui_child_handoff() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
-        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        write_config(&context, r#"plug "https://example.com/test/plugin.git""#);
         let published = record::publish_bootstrap(&context).unwrap();
         let record_path = published.record_path().to_path_buf();
         let session_dir = record_path.parent().unwrap().to_path_buf();
@@ -1208,7 +1208,7 @@ mod tests {
     async fn normal_session_defers_when_work_needs_ui_but_no_host_exists() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
-        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        write_config(&context, r#"plug "https://example.com/test/plugin.git""#);
         let mut tmux = MockTmux::hosted();
         tmux.waited_host_available = false;
 
@@ -1256,7 +1256,7 @@ mod tests {
         write_config(
             &context,
             &format!(
-                r#"plugin "{}" local=#true enabled=#false {{ opt "disabled" "yes" }}"#,
+                r#"plug "{}" local=#true enabled=#false {{ opt "disabled" "yes" }}"#,
                 plugin_dir.display()
             ),
         );
@@ -1290,8 +1290,8 @@ mod tests {
             &context,
             &format!(
                 concat!(
-                    "plugin \"{}\" local=#true cond=#false {{ opt \"skipped\" \"yes\" }}\n",
-                    "plugin \"{}\" local=#true {{ opt \"loaded\" \"yes\" }}\n",
+                    "plug \"{}\" local=#true cond=#false {{ opt \"skipped\" \"yes\" }}\n",
+                    "plug \"{}\" local=#true {{ opt \"loaded\" \"yes\" }}\n",
                 ),
                 skipped_dir.display(),
                 loaded_dir.display(),
@@ -1329,17 +1329,17 @@ mod tests {
             &context,
             &format!(
                 r#"
-plugin "{}" local=#true enabled=#false {{
+plug "{}" local=#true enabled=#false {{
     if "kill -TERM $$" {{
         bind "disabled" {{ shell "./disabled" }}
     }}
 }}
-plugin "{}" local=#true cond=#false {{
+plug "{}" local=#true cond=#false {{
     if "kill -TERM $$" {{
         bind "skipped" {{ shell "./skipped" }}
     }}
 }}
-plugin "{}" local=#true {{
+plug "{}" local=#true {{
     if #false {{
         bind "then" {{ shell "./then" }}
     }}
@@ -1382,7 +1382,7 @@ plugin "{}" local=#true {{
         let context = context(dir.path());
         write_config(
             &context,
-            r#"plugin "user/repo" enabled="n=$(cat evaluations 2>/dev/null || printf 0); n=$((n+1)); printf %s $n > evaluations; test $n -ne 2""#,
+            r#"plug "user/repo" enabled="n=$(cat evaluations 2>/dev/null || printf 0); n=$((n+1)); printf %s $n > evaluations; test $n -ne 2""#,
         );
         let lock_path = context.config_path.parent().unwrap().join("tmup.lock");
         let mut lock = LockFile::new();
@@ -1427,7 +1427,7 @@ plugin "{}" local=#true {{
             &context,
             &format!(
                 r#"
-plugin "{}" local=#true {{
+plug "{}" local=#true {{
     if "n=$(cat branch-evaluations 2>/dev/null || printf 0); n=$((n+1)); printf %s $n > branch-evaluations; test $n -eq 1" {{
         bind "selected" {{ shell "./selected" }}
     }}
@@ -1485,7 +1485,7 @@ plugin "{}" local=#true {{
         write_config(
             &context,
             &format!(
-                r#"plugin "{}" local=#true cond="n=$(cat evaluations 2>/dev/null || printf 0); n=$((n+1)); printf %s $n > evaluations; test $n -ne 2""#,
+                r#"plug "{}" local=#true cond="n=$(cat evaluations 2>/dev/null || printf 0); n=$((n+1)); printf %s $n > evaluations; test $n -ne 2""#,
                 plugin_dir.display()
             ),
         );
@@ -1556,7 +1556,7 @@ plugin "{}" local=#true {{
         std::fs::create_dir_all(&inherited_plugin).unwrap();
         let inherited_script = inherited_plugin.join("inherited.tmux");
         std::fs::write(&inherited_script, "#!/bin/sh\n").unwrap();
-        write_config(&context, &format!(r#"plugin "{}" local=#true"#, inherited_plugin.display()));
+        write_config(&context, &format!(r#"plug "{}" local=#true"#, inherited_plugin.display()));
         let default_config = context.state_root.join("tmup.kdl");
         std::fs::create_dir_all(default_config.parent().unwrap()).unwrap();
         std::fs::write(&default_config, "").unwrap();
@@ -1576,7 +1576,7 @@ plugin "{}" local=#true {{
     async fn deferred_session_falls_back_inline_and_rereads_config() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
-        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        write_config(&context, r#"plug "https://example.com/test/plugin.git""#);
         let mut tmux = MockTmux::hosted();
         tmux.waited_host_available = false;
         tmux.config_replacement_on_ui_inspection =
@@ -1596,7 +1596,7 @@ plugin "{}" local=#true {{
     async fn deferred_session_uses_inline_mode_without_a_fallback_message() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
-        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        write_config(&context, r#"plug "https://example.com/test/plugin.git""#);
         let mut tmux = MockTmux::hosted();
         tmux.ui_available = false;
         tmux.config_replacement_on_ui_inspection =
@@ -1613,7 +1613,7 @@ plugin "{}" local=#true {{
     async fn visible_work_inline_fallback_waits_for_the_lock_silently() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
-        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        write_config(&context, r#"plug "https://example.com/test/plugin.git""#);
         let lock_path = context.state_root.join("operations.lock");
         let held_lock = OperationLock::acquire(&lock_path).unwrap();
         let release_lock = std::thread::spawn(move || {
@@ -1676,7 +1676,7 @@ plugin "{}" local=#true {{
     async fn normal_session_falls_back_inline_when_deferral_fails() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
-        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        write_config(&context, r#"plug "https://example.com/test/plugin.git""#);
         let mut tmux = MockTmux::hosted();
         tmux.defer_fails = true;
         tmux.config_replacement_on_defer = Some((context.config_path.clone(), String::new()));
@@ -1706,7 +1706,7 @@ plugin "{}" local=#true {{
     async fn record_cleanup_failure_does_not_cancel_inline_fallback() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
-        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        write_config(&context, r#"plug "https://example.com/test/plugin.git""#);
         let sessions_root = context.state_root.join("init-sessions");
         let mut tmux = MockTmux::hosted();
         tmux.defer_fails = true;
@@ -1725,7 +1725,7 @@ plugin "{}" local=#true {{
     async fn normal_session_hosts_a_child_when_a_current_target_is_available() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
-        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        write_config(&context, r#"plug "https://example.com/test/plugin.git""#);
         let mut tmux = MockTmux::hosted();
         tmux.current_host_available = true;
 
@@ -1750,7 +1750,7 @@ plugin "{}" local=#true {{
     async fn direct_parent_preserves_named_hosted_plugin_failures() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
-        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        write_config(&context, r#"plug "https://example.com/test/plugin.git""#);
         let mut tmux = MockTmux::hosted();
         tmux.current_host_available = true;
         tmux.host_disposition = ChildDisposition::CompletedWithPluginFailures(vec![
@@ -1771,7 +1771,7 @@ plugin "{}" local=#true {{
     async fn deferred_parent_preserves_named_hosted_plugin_failures() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
-        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        write_config(&context, r#"plug "https://example.com/test/plugin.git""#);
         let continuation = Continuation::DeferredBootstrap(context);
         let mut tmux = MockTmux::hosted();
         tmux.host_disposition = ChildDisposition::CompletedWithPluginFailures(vec![
@@ -1792,7 +1792,7 @@ plugin "{}" local=#true {{
     async fn resumed_bootstrap_preserves_session_when_child_completion_is_unknown() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
-        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        write_config(&context, r#"plug "https://example.com/test/plugin.git""#);
         let published = record::publish_bootstrap(&context).unwrap();
         let record_path = published.record_path().to_path_buf();
         let session_dir = record_path.parent().unwrap().to_path_buf();
@@ -1812,7 +1812,7 @@ plugin "{}" local=#true {{
     async fn resumed_bootstrap_cleans_session_after_confirmed_child_termination() {
         let dir = tempdir().unwrap();
         let context = context(dir.path());
-        write_config(&context, r#"plugin "https://example.com/test/plugin.git""#);
+        write_config(&context, r#"plug "https://example.com/test/plugin.git""#);
         let published = record::publish_bootstrap(&context).unwrap();
         let record_path = published.record_path().to_path_buf();
         let session_dir = record_path.parent().unwrap().to_path_buf();
@@ -1840,8 +1840,8 @@ plugin "{}" local=#true {{
             &context,
             &format!(
                 concat!(
-                    "plugin \"http://127.0.0.1:1/test/plugin.git\" cond=#false\n",
-                    "plugin \"{}\" local=#true\n",
+                    "plug \"http://127.0.0.1:1/test/plugin.git\" cond=#false\n",
+                    "plug \"{}\" local=#true\n",
                 ),
                 usable_plugin.display(),
             ),

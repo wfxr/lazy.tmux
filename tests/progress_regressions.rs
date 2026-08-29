@@ -590,7 +590,7 @@ fn sync_surfaces_lockfile_write_failure() {
     let config_dir = dir.path().join("alt-config");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("custom.kdl");
-    std::fs::write(&config_path, r#"plugin "https://example.com/test/plugin.git""#).unwrap();
+    std::fs::write(&config_path, r#"plug "https://example.com/test/plugin.git""#).unwrap();
 
     let original_mode = std::fs::metadata(&config_dir).unwrap().permissions().mode();
     let mut readonly = std::fs::metadata(&config_dir).unwrap().permissions();
@@ -635,7 +635,7 @@ fn sync_failure_log_includes_stage_and_context_metadata() {
     let config_dir = dir.path().join("config");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "https://example.com/test/plugin.git""#).unwrap();
+    std::fs::write(&config_path, r#"plug "https://example.com/test/plugin.git""#).unwrap();
 
     let output = Command::cargo_bin("tmup")
         .unwrap()
@@ -677,8 +677,8 @@ fn sync_command_prepare_runs_with_real_parallelism_when_enabled() {
         &config_path,
         r#"
 options { concurrency 2 }
-plugin "https://example.com/test/plugin-a.git"
-plugin "https://example.com/test/plugin-b.git"
+plug "https://example.com/test/plugin-a.git"
+plug "https://example.com/test/plugin-b.git"
         "#,
     )
     .unwrap();
@@ -723,7 +723,7 @@ fn init_parent_schedules_bootstrap_in_background() {
     let config_dir = dir.path().join("config/tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
 
     let tmux_log = dir.path().join("tmux.log");
     let fake_tmux_dir = write_fake_tmux_with_log(dir.path(), &tmux_log);
@@ -788,7 +788,7 @@ fn init_resume_uses_recorded_sources_and_cleans_its_session() {
     let config_dir = dir.path().join("config/tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
     let state_home = dir.path().join("state");
     let tmux_log = dir.path().join("tmux.log");
     let fake_tmux_dir = write_fake_tmux_with_log(dir.path(), &tmux_log);
@@ -809,7 +809,7 @@ fn init_resume_uses_recorded_sources_and_cleans_its_session() {
 
     std::fs::write(&config_path, "").unwrap();
     let bad_config = dir.path().join("bad.kdl");
-    std::fs::write(&bad_config, "plugin {\n").unwrap();
+    std::fs::write(&bad_config, "plug {\n").unwrap();
 
     Command::cargo_bin("tmup")
         .unwrap()
@@ -837,8 +837,8 @@ fn init_parent_bootstrap_uses_resolved_tmup_config_path() {
     std::fs::create_dir_all(&default_config_dir).unwrap();
     std::fs::create_dir_all(&override_dir).unwrap();
     let override_config = override_dir.join("custom.kdl");
-    std::fs::write(default_config_dir.join("tmup.kdl"), r#"plugin "user/default""#).unwrap();
-    std::fs::write(&override_config, r#"plugin "user/override""#).unwrap();
+    std::fs::write(default_config_dir.join("tmup.kdl"), r#"plug "user/default""#).unwrap();
+    std::fs::write(&override_config, r#"plug "user/override""#).unwrap();
 
     let tmux_log = dir.path().join("tmux.log");
     let fake_tmux_dir = write_fake_tmux_with_log(dir.path(), &tmux_log);
@@ -912,7 +912,7 @@ fn init_parent_bootstrap_marks_absent_tpm_config_as_resolved_none() {
     let config_dir = config_home.join("tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let tmup_config = config_dir.join("tmup.kdl");
-    std::fs::write(&tmup_config, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&tmup_config, r#"plug "user/repo""#).unwrap();
 
     let tmux_log = dir.path().join("tmux.log");
     let fake_tmux_dir = write_fake_tmux_with_log(dir.path(), &tmux_log);
@@ -998,7 +998,7 @@ fn init_bootstrap_no_tpm_config_disables_rediscovery() {
     std::fs::create_dir_all(&config_dir).unwrap();
     let tmup_config = config_dir.join("tmup.kdl");
     let tpm_config = config_dir.join("tmux.conf");
-    std::fs::write(&tmup_config, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&tmup_config, r#"plug "user/repo""#).unwrap();
     let record_path = schedule_bootstrap_record(dir.path(), &tmup_config, Some("mixed"));
 
     std::fs::write(&tmup_config, "").unwrap();
@@ -1031,7 +1031,7 @@ fn init_parent_uses_immediate_ui_when_attached_client_is_ready() {
     let config_dir = dir.path().join("config/tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
 
     let tmux_log = dir.path().join("tmux.log");
     let fake_tmux_dir = write_fake_tmux_bootstrap_with_log(dir.path(), &tmux_log, 0, 1);
@@ -1070,7 +1070,7 @@ fn init_parent_missing_popup_result_includes_popup_context() {
     let config_dir = dir.path().join("config/tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
 
     let tmux_log = dir.path().join("tmux.log");
     let fake_tmux_dir = write_fake_tmux_bootstrap_with_log(dir.path(), &tmux_log, 0, 1);
@@ -1105,7 +1105,7 @@ fn init_parent_tmux_3_2_popup_omits_title_flag() {
     let config_dir = dir.path().join("config/tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
 
     let tmux_log = dir.path().join("tmux.log");
     let fake_tmux_dir = write_fake_tmux_versioned_with_log(dir.path(), &tmux_log, "tmux 3.2", 0, 1);
@@ -1148,7 +1148,7 @@ fn init_parent_uses_split_only_when_tmux_is_2_0() {
     let config_dir = dir.path().join("config/tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
 
     let tmux_log = dir.path().join("tmux.log");
     let fake_tmux_dir = write_fake_tmux_versioned_with_log(dir.path(), &tmux_log, "tmux 2.0", 1, 0);
@@ -1181,7 +1181,7 @@ fn init_parent_uses_inline_when_tmux_is_1_9() {
     let config_dir = dir.path().join("config/tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
 
     let tmux_log = dir.path().join("tmux.log");
     let fake_tmux_dir = write_fake_tmux_versioned_with_log(dir.path(), &tmux_log, "tmux 1.9", 1, 1);
@@ -1215,7 +1215,7 @@ fn init_bootstrap_uses_split_when_tmux_is_2_0() {
     let config_dir = dir.path().join("config/tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
     let record_path = schedule_bootstrap_record(dir.path(), &config_path, None);
 
     let tmux_log = dir.path().join("tmux.log");
@@ -1296,7 +1296,7 @@ fn init_bootstrap_popup_path_targets_explicit_client_and_skips_wait_for() {
     let config_dir = dir.path().join("config/tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
     let record_path = schedule_bootstrap_record(dir.path(), &config_path, None);
 
     let tmux_log = dir.path().join("tmux.log");
@@ -1385,7 +1385,7 @@ fn production_popup_blocks_until_the_real_child_publishes_its_result() {
     let config_path = config_dir.join("tmup.kdl");
     std::fs::write(
         &config_path,
-        "options { auto-install #true }\nplugin \"https://example.com/test/plugin.git\"\n",
+        "options { auto-install #true }\nplug \"https://example.com/test/plugin.git\"\n",
     )
     .unwrap();
     let record_path = schedule_bootstrap_record(dir.path(), &config_path, None);
@@ -1438,7 +1438,7 @@ fn production_split_waits_for_child_signal_before_consuming_the_result() {
     let config_path = config_dir.join("tmup.kdl");
     std::fs::write(
         &config_path,
-        "options { auto-install #true }\nplugin \"https://example.com/test/plugin.git\"\n",
+        "options { auto-install #true }\nplug \"https://example.com/test/plugin.git\"\n",
     )
     .unwrap();
     let record_path = schedule_bootstrap_record(dir.path(), &config_path, None);
@@ -1481,7 +1481,7 @@ fn production_split_preserves_session_when_wait_completion_is_unknown() {
     let config_dir = dir.path().join("config/tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
     let record_path = schedule_bootstrap_record(dir.path(), &config_path, None);
     let session_dir = record_path.parent().unwrap().to_path_buf();
 
@@ -1519,7 +1519,7 @@ fn init_bootstrap_retries_probe_until_target_is_ready() {
     let config_dir = dir.path().join("config/tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
     let record_path = schedule_bootstrap_record(dir.path(), &config_path, None);
 
     let tmux_log = dir.path().join("tmux.log");
@@ -1560,7 +1560,7 @@ fn init_bootstrap_keeps_probing_long_enough_for_late_target() {
     let config_dir = dir.path().join("config/tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
     let record_path = schedule_bootstrap_record(dir.path(), &config_path, None);
 
     let tmux_log = dir.path().join("tmux.log");
@@ -1610,10 +1610,10 @@ fn false_load_condition_still_builds_and_reports_failure_before_loading_eligible
         format!(
             r#"
 options {{ auto-install #true }}
-plugin "https://example.com/test/plugin.git" cond=#false build=": > '{}'; exit 1" {{
+plug "https://example.com/test/plugin.git" cond=#false build=": > '{}'; exit 1" {{
     opt "must-not-load" "yes"
 }}
-plugin "{}" local=#true {{
+plug "{}" local=#true {{
     opt "neighbor-loaded" "yes"
 }}
         "#,

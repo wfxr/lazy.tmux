@@ -11,7 +11,7 @@ tmup can conditionally include or load a plugin as a whole, but an enabled and l
 A remote or local plugin may contain `if` nodes with optional, immediately following `else` nodes. Each `if` accepts exactly one boolean or non-empty `/bin/sh` predicate string and accepts no properties or KDL type annotations. An `else` accepts no arguments or properties. Comments may appear between the paired nodes, but any orphaned, repeated, or non-adjacent `else` is invalid.
 
 ```kdl
-plugin "wfxr/tmux-fzf" {
+plug "wfxr/tmux-fzf" {
     if #"[ -n "$SSH_CLIENT" ] || [ -f /.dockerenv ]"# {
         bind "M-w" {
             shell "scripts/session.sh attach" background=#true

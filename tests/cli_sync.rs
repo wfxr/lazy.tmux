@@ -28,7 +28,7 @@ fn sync_errors_on_unknown_plugin_id() {
     let config_dir = dir.path().join("config/tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
 
     Command::cargo_bin("tmup")
         .unwrap()
@@ -48,7 +48,7 @@ fn sync_errors_on_local_plugin_target() {
     let config_dir = dir.path().join("config/tmux");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "/tmp/local-plugin" local=#true name="local-plugin""#)
+    std::fs::write(&config_path, r#"plug "/tmp/local-plugin" local=#true name="local-plugin""#)
         .unwrap();
 
     Command::cargo_bin("tmup")
@@ -69,7 +69,7 @@ fn disabling_plugin_prunes_lock_but_checkout_waits_for_clean() {
     make_remote_repo(dir.path());
     let gitconfig = write_git_rewrite_config(dir.path());
     let config_path = dir.path().join("config/tmux/tmup.kdl");
-    write_file(&config_path, r#"plugin "https://example.com/test/plugin.git""#);
+    write_file(&config_path, r#"plug "https://example.com/test/plugin.git""#);
 
     configured_command(dir.path(), &config_path, &gitconfig).arg("install").assert().success();
 
@@ -78,7 +78,7 @@ fn disabling_plugin_prunes_lock_but_checkout_waits_for_clean() {
     assert!(plugin_dir.exists());
     assert!(std::fs::read_to_string(&lock_path).unwrap().contains("example.com/test/plugin"));
 
-    write_file(&config_path, r#"plugin "https://example.com/test/plugin.git" enabled=#false"#);
+    write_file(&config_path, r#"plug "https://example.com/test/plugin.git" enabled=#false"#);
     configured_command(dir.path(), &config_path, &gitconfig).arg("sync").assert().success();
 
     assert!(plugin_dir.exists(), "sync must not delete a newly disabled checkout");
@@ -97,7 +97,7 @@ fn hard_enable_condition_errors_precede_lock_and_plugin_mutation() {
     let lock_path = dir.path().join("config/tmux/tmup.lock");
     let original_lock = r#"{"version":2,"plugins":{}}"#;
     write_file(&lock_path, original_lock);
-    write_file(&config_path, r#"plugin "user/repo" enabled="kill -TERM $$""#);
+    write_file(&config_path, r#"plug "user/repo" enabled="kill -TERM $$""#);
 
     configured_command(dir.path(), &config_path, &gitconfig)
         .arg("sync")
@@ -117,7 +117,7 @@ fn enable_condition_timeout_is_a_hard_error_before_mutation() {
     let lock_path = dir.path().join("config/tmux/tmup.lock");
     let original_lock = r#"{"version":2,"plugins":{}}"#;
     write_file(&lock_path, original_lock);
-    write_file(&config_path, r#"plugin "user/repo" enabled="sleep 30""#);
+    write_file(&config_path, r#"plug "user/repo" enabled="sleep 30""#);
 
     configured_command(dir.path(), &config_path, &gitconfig)
         .arg("sync")

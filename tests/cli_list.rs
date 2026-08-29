@@ -12,7 +12,7 @@ fn list_prints_state_and_build_status_columns() {
 
     // Write config
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
 
     // Write lockfile
     let lock_path = config_dir.join("tmup.lock");
@@ -39,7 +39,7 @@ fn list_uses_human_readable_default_columns() {
     std::fs::create_dir_all(&config_dir).unwrap();
 
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
 
     Command::cargo_bin("tmup")
         .unwrap()
@@ -68,7 +68,7 @@ fn list_verbose_shows_diagnostic_columns() {
     std::fs::create_dir_all(&config_dir).unwrap();
 
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo" name="repo-name""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo" name="repo-name""#).unwrap();
 
     Command::cargo_bin("tmup")
         .unwrap()
@@ -97,8 +97,8 @@ fn list_shows_plugin_entries() {
     std::fs::write(
         &config_path,
         r#"
-plugin "tmux-plugins/tmux-sensible"
-plugin "catppuccin/tmux"
+plug "tmux-plugins/tmux-sensible"
+plug "catppuccin/tmux"
     "#,
     )
     .unwrap();
@@ -127,7 +127,7 @@ fn list_warns_before_table_when_lock_metadata_is_stale() {
     std::fs::create_dir_all(&config_dir).unwrap();
 
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo" build="make install""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo" build="make install""#).unwrap();
 
     let lock_path = config_dir.join("tmup.lock");
     let stale_lock = r#"{"version":2,"plugins":{"github.com/user/repo":{"source":"user/repo","tracking":{"type":"branch","value":"main"},"commit":"abc1234"}}}"#;
@@ -185,7 +185,7 @@ fn list_does_not_mutate_stale_lockfile() {
     std::fs::create_dir_all(&config_dir).unwrap();
 
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
 
     let lock_path = config_dir.join("tmup.lock");
     let original = r#"{"version":2,"plugins":{"github.com/user/repo":{"source":"user/repo","tracking":{"type":"branch","value":"main"},"commit":"abc1234"}}}"#;
@@ -215,7 +215,7 @@ fn list_marks_missing_local_plugin_as_missing() {
 
     let missing_local = dir.path().join("missing-plugin");
     let config_path = config_dir.join("tmup.kdl");
-    std::fs::write(&config_path, format!(r#"plugin "{}" local=#true"#, missing_local.display()))
+    std::fs::write(&config_path, format!(r#"plug "{}" local=#true"#, missing_local.display()))
         .unwrap();
 
     Command::cargo_bin("tmup")
@@ -269,9 +269,9 @@ fn list_uses_effective_plugin_specification_and_keeps_false_predicates_quiet() {
         &config_path,
         format!(
             r#"
-plugin "user/enabled" enabled="test \"$TMUP_TEST_HOST\" = workstation"
-plugin "user/disabled" enabled="echo predicate-stdout; echo predicate-stderr >&2; exit 23"
-plugin "{}" local=#true enabled=#false
+plug "user/enabled" enabled="test \"$TMUP_TEST_HOST\" = workstation"
+plug "user/disabled" enabled="echo predicate-stdout; echo predicate-stderr >&2; exit 23"
+plug "{}" local=#true enabled=#false
 "#,
             local.display(),
         ),
@@ -304,7 +304,7 @@ fn list_rejects_unknown_native_syntax_before_conditions_or_state_mutation() {
     std::fs::write(
         &config_path,
         format!(
-            "plugin \"user/first\" enabled=\"touch {}\"\nplugin \"user/repo\" future-property=#true",
+            "plug \"user/first\" enabled=\"touch {}\"\nplug \"user/repo\" future-property=#true",
             marker.display()
         ),
     )
@@ -336,8 +336,8 @@ fn list_reports_future_load_eligibility_independently_from_managed_state() {
     std::fs::write(
         &config_path,
         r#"
-plugin "user/loadable" cond=#true
-plugin "user/skipped" cond="echo predicate-stdout; echo predicate-stderr >&2; exit 17"
+plug "user/loadable" cond=#true
+plug "user/skipped" cond="echo predicate-stdout; echo predicate-stderr >&2; exit 17"
 "#,
     )
     .unwrap();
@@ -371,7 +371,7 @@ fn list_recognizes_runtime_configuration_without_evaluating_it() {
     std::fs::write(
         &config_path,
         r#"
-plugin "user/repo" {
+plug "user/repo" {
     if "kill -TERM $$" {
         bind "unreachable" { shell "./unreachable" }
     }

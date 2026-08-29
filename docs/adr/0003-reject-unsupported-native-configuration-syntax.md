@@ -8,11 +8,11 @@ tmup configuration controls plugin lifecycle work and server-global tmux behavio
 
 ## Decision
 
-Native `tmup.kdl` is a closed, fail-fast grammar. The document root contains at most one `options` node and any number of `plugin` nodes in any order. Unknown root nodes and duplicate `options` nodes are errors.
+Native `tmup.kdl` is a closed, fail-fast grammar. The document root contains at most one `options` node and any number of `plug` nodes in any order. Unknown root nodes and duplicate `options` nodes are errors.
 
 An `options` node requires a child block and has no arguments, properties, or KDL type annotations. Its child block contains at most one `auto-install` node and at most one `concurrency` node. Each option child has exactly one argument of its documented type and has no properties, child block, or KDL type annotation. Missing nodes retain their defaults.
 
-A `plugin` node has exactly one untyped, non-empty source string. It accepts only documented properties, each at most once and with its documented type. Unknown properties, extra positional arguments, and unknown child nodes are errors. `build` is available only as a plugin property; the former `build` child form is unsupported.
+A `plug` node has exactly one untyped, non-empty source string. It accepts only documented properties, each at most once and with its documented type. Unknown properties, extra positional arguments, and unknown child nodes are errors. `build` is available only as a plugin property; the former `build` child form is unsupported.
 
 Every recognized node and entry has an exact documented shape. Unsupported arguments, properties, child blocks, and KDL type annotations are errors throughout the document. Plugin sources, explicit names, tracking selectors, build commands, option keys, environment names, binding keys, binding shell commands, and binding option strings must contain a non-whitespace character. Option values and environment values may be empty. `opt-prefix` may also be empty.
 

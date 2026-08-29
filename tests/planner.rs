@@ -45,7 +45,7 @@ fn preview_returns_false_when_lock_and_config_are_aligned() {
     git(&["commit", "-m", "init"], &plugin_dir);
     let commit = git(&["rev-parse", "HEAD"], &plugin_dir);
 
-    let config = make_config(r#"plugin "user/repo""#);
+    let config = make_config(r#"plug "user/repo""#);
     let mut lock = LockFile::new();
     let mut entry = LockEntry::branch("main", &commit);
     entry.config_hash = tmup::lockfile::remote_plugin_config_hash(&config.plugins[0]);
@@ -61,7 +61,7 @@ fn preview_returns_true_for_missing_plugin_dir_under_init_policy() {
     let paths = Paths::for_test(dir.path().join("data"), dir.path().join("state"));
     paths.ensure_dirs().unwrap();
 
-    let config = make_config(r#"plugin "user/repo""#);
+    let config = make_config(r#"plug "user/repo""#);
     let mut lock = LockFile::new();
     let mut entry = LockEntry::branch("main", "abc123");
     entry.config_hash = tmup::lockfile::remote_plugin_config_hash(&config.plugins[0]);
@@ -81,7 +81,7 @@ fn preview_returns_true_for_broken_plugin_dir_under_init_policy() {
     let paths = Paths::for_test(dir.path().join("data"), dir.path().join("state"));
     paths.ensure_dirs().unwrap();
 
-    let config = make_config(r#"plugin "user/repo""#);
+    let config = make_config(r#"plug "user/repo""#);
     let mut lock = LockFile::new();
     let mut entry = LockEntry::branch("main", "abc123");
     entry.config_hash = tmup::lockfile::remote_plugin_config_hash(&config.plugins[0]);
@@ -102,8 +102,8 @@ fn preview_returns_true_for_broken_plugin_dir_under_init_policy() {
 fn preview_returns_true_for_same_commit_build_change_requires_republish() {
     let dir = tempdir().unwrap();
     let paths = Paths::for_test(dir.path().join("data"), dir.path().join("state"));
-    let old_config = make_config(r#"plugin "user/repo" build="touch built-v1""#);
-    let new_config = make_config(r#"plugin "user/repo" build="touch built-v2""#);
+    let old_config = make_config(r#"plug "user/repo" build="touch built-v1""#);
+    let new_config = make_config(r#"plug "user/repo" build="touch built-v2""#);
     let mut lock = LockFile::new();
     let mut entry = LockEntry::branch("main", "abc123");
     entry.config_hash = tmup::lockfile::remote_plugin_config_hash(&old_config.plugins[0]);
@@ -118,7 +118,7 @@ fn preview_returns_true_for_same_commit_build_change_requires_republish() {
 
 #[test]
 fn build_failure_keeps_state_and_result_separate() {
-    let config = make_config(r#"plugin "user/repo" build="make""#);
+    let config = make_config(r#"plug "user/repo" build="make""#);
     let mut lock = LockFile::new();
     lock.plugins.insert("github.com/user/repo".into(), LockEntry::branch("main", "abc123"));
     let health: HashMap<String, RepoHealth> =
@@ -143,7 +143,7 @@ fn build_failure_keeps_state_and_result_separate() {
 
 #[test]
 fn missing_plugin_with_build_failure_shows_missing_and_failed() {
-    let config = make_config(r#"plugin "user/repo" build="make""#);
+    let config = make_config(r#"plug "user/repo" build="make""#);
     let mut lock = LockFile::new();
     lock.plugins.insert("github.com/user/repo".into(), LockEntry::branch("main", "abc123"));
     let health: HashMap<String, RepoHealth> = HashMap::new();
@@ -166,7 +166,7 @@ fn missing_plugin_with_build_failure_shows_missing_and_failed() {
 
 #[test]
 fn installed_plugin_without_build_shows_none_build_status() {
-    let config = make_config(r#"plugin "user/repo""#);
+    let config = make_config(r#"plug "user/repo""#);
     let mut lock = LockFile::new();
     lock.plugins.insert("github.com/user/repo".into(), LockEntry::branch("main", "abc123"));
     let health: HashMap<String, RepoHealth> =
@@ -183,7 +183,7 @@ fn local_plugin_status() {
     let dir = tempdir().unwrap();
     let plugin_dir = dir.path().join("my-plugin");
     std::fs::create_dir_all(&plugin_dir).unwrap();
-    let config = make_config(&format!(r#"plugin "{}" local=#true"#, plugin_dir.display()));
+    let config = make_config(&format!(r#"plug "{}" local=#true"#, plugin_dir.display()));
     let lock = LockFile::new();
     let health = HashMap::new();
     let failed_builds = HashSet::new();
@@ -199,7 +199,7 @@ fn local_plugin_status() {
 fn missing_local_plugin_shows_missing_and_none() {
     let dir = tempdir().unwrap();
     let plugin_dir = dir.path().join("missing-plugin");
-    let config = make_config(&format!(r#"plugin "{}" local=#true"#, plugin_dir.display()));
+    let config = make_config(&format!(r#"plug "{}" local=#true"#, plugin_dir.display()));
     let lock = LockFile::new();
     let health = HashMap::new();
     let failed_builds = HashSet::new();
@@ -216,7 +216,7 @@ fn local_plugin_file_path_shows_broken_and_none() {
     let dir = tempdir().unwrap();
     let plugin_file = dir.path().join("plugin.tmux");
     std::fs::write(&plugin_file, "#!/bin/sh\n").unwrap();
-    let config = make_config(&format!(r#"plugin "{}" local=#true"#, plugin_file.display()));
+    let config = make_config(&format!(r#"plug "{}" local=#true"#, plugin_file.display()));
     let lock = LockFile::new();
     let health = HashMap::new();
     let failed_builds = HashSet::new();
@@ -230,7 +230,7 @@ fn local_plugin_file_path_shows_broken_and_none() {
 
 #[test]
 fn pinned_tag_status() {
-    let config = make_config(r#"plugin "user/repo" tag="v1.0""#);
+    let config = make_config(r#"plug "user/repo" tag="v1.0""#);
     let mut lock = LockFile::new();
     lock.plugins.insert("github.com/user/repo".into(), LockEntry::tag("v1.0", "abc123"));
     let health: HashMap<String, RepoHealth> =
@@ -243,7 +243,7 @@ fn pinned_tag_status() {
 
 #[test]
 fn pinned_tag_with_drifted_head_shows_outdated() {
-    let config = make_config(r#"plugin "user/repo" tag="v1.0""#);
+    let config = make_config(r#"plug "user/repo" tag="v1.0""#);
     let mut lock = LockFile::new();
     lock.plugins.insert("github.com/user/repo".into(), LockEntry::tag("v1.0", "abc123"));
     let health: HashMap<String, RepoHealth> =
@@ -258,7 +258,7 @@ fn pinned_tag_with_drifted_head_shows_outdated() {
 
 #[test]
 fn pinned_commit_with_drifted_head_shows_outdated() {
-    let config = make_config(r#"plugin "user/repo" commit="abc123""#);
+    let config = make_config(r#"plug "user/repo" commit="abc123""#);
     let mut lock = LockFile::new();
     lock.plugins.insert("github.com/user/repo".into(), LockEntry::commit("abc123"));
     let health: HashMap<String, RepoHealth> =
@@ -273,7 +273,7 @@ fn pinned_commit_with_drifted_head_shows_outdated() {
 
 #[test]
 fn outdated_state_when_installed_commit_differs_from_lock() {
-    let config = make_config(r#"plugin "user/repo""#);
+    let config = make_config(r#"plug "user/repo""#);
     let mut lock = LockFile::new();
     lock.plugins.insert("github.com/user/repo".into(), LockEntry::branch("main", "abc123"));
     let health: HashMap<String, RepoHealth> =
@@ -370,7 +370,7 @@ fn broken_state_display_string() {
 
 #[test]
 fn broken_repo_shows_broken_in_list() {
-    let config = make_config(r#"plugin "user/repo""#);
+    let config = make_config(r#"plug "user/repo""#);
     let mut lock = LockFile::new();
     lock.plugins.insert("github.com/user/repo".into(), LockEntry::branch("main", "abc123"));
     let health: HashMap<String, RepoHealth> =

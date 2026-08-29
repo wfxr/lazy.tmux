@@ -192,7 +192,7 @@ fn config_mode_cli_list_mixed_warns_and_prefers_kdl() {
     let config_dir = config_home.join("tmux");
     write_file(
         &config_dir.join("tmup.kdl"),
-        r#"plugin "tmux-plugins/tmux-sensible" branch="feature""#,
+        r#"plug "tmux-plugins/tmux-sensible" branch="feature""#,
     );
     write_file(
         &config_dir.join("tmux.conf"),
@@ -230,7 +230,7 @@ fn config_mode_cli_sync_mixed_writes_lockfile_next_to_kdl_with_kdl_precedence() 
     let config_dir = config_home.join("tmux");
     write_file(
         &config_dir.join("tmup.kdl"),
-        r#"plugin "https://example.com/test/plugin.git" branch="feature""#,
+        r#"plug "https://example.com/test/plugin.git" branch="feature""#,
     );
     write_file(
         &config_dir.join("tmux.conf"),

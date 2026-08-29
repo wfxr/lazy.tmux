@@ -7,28 +7,28 @@ options {
 }
 
 // Simplest form: GitHub shorthand, track default branch
-plugin "tmux-plugins/tmux-sensible"
+plug "tmux-plugins/tmux-sensible"
 
 // Pin to a tag — update will skip this plugin
-plugin "tmux-plugins/tmux-yank" tag="v2.3"
+plug "tmux-plugins/tmux-yank" tag="v2.3"
 
 // Full config: branch + build + opts
-plugin "tmux-plugins/tmux-resurrect" branch="master" build="make install" {
+plug "tmux-plugins/tmux-resurrect" branch="master" build="make install" {
     opt "resurrect-strategy-vim" "session"
     opt "resurrect-save-bash-history" "on"
 }
 
 // opt-prefix reduces repetition
-plugin "catppuccin/tmux" opt-prefix="catppuccin_" {
+plug "catppuccin/tmux" opt-prefix="catppuccin_" {
     opt "flavor" "mocha"
     opt "window_text" "#W"
 }
 
 // Non-GitHub source
-plugin "https://gitlab.com/user/my-plugin.git"
+plug "https://gitlab.com/user/my-plugin.git"
 
 // Local plugin: loaded in-place, not managed by lock
-plugin "~/dev/my-tmux-plugin" local=#true name="my-plugin-dev"
+plug "~/dev/my-tmux-plugin" local=#true name="my-plugin-dev"
 
 // Disable a plugin with KDL slashdash
-/-plugin "tmux-plugins/tmux-continuum"
+/-plug "tmux-plugins/tmux-continuum"

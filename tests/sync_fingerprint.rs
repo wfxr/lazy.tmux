@@ -9,8 +9,8 @@ use utils::{load_native_config as parse_config, write_file};
 
 #[test]
 fn default_branch_hash_uses_declared_selector_semantics() {
-    let default_cfg = parse_config(r#"plugin "user/repo""#).unwrap();
-    let branch_cfg = parse_config(r#"plugin "user/repo" branch="main""#).unwrap();
+    let default_cfg = parse_config(r#"plug "user/repo""#).unwrap();
+    let branch_cfg = parse_config(r#"plug "user/repo" branch="main""#).unwrap();
 
     let default_hash = remote_plugin_config_hash(&default_cfg.plugins[0]).unwrap();
     let default_hash_again = remote_plugin_config_hash(&default_cfg.plugins[0]).unwrap();
@@ -24,22 +24,22 @@ fn default_branch_hash_uses_declared_selector_semantics() {
 fn config_fingerprint_ignores_non_lock_affecting_changes() {
     let cfg_a = parse_config(
         r#"
-plugin "user/beta" name="beta" opt-prefix="beta_" {
+plug "user/beta" name="beta" opt-prefix="beta_" {
     opt "flavor" "mocha"
 }
-plugin "https://github.com/user/alpha.git" name="alpha"
-plugin "/tmp/local-a" local=#true name="local-a"
+plug "https://github.com/user/alpha.git" name="alpha"
+plug "/tmp/local-a" local=#true name="local-a"
 "#,
     )
     .unwrap();
 
     let cfg_b = parse_config(
         r#"
-plugin "/tmp/local-b" local=#true name="local-b"
-plugin "git@github.com:user/alpha.git" name="renamed-alpha" opt-prefix="ignored_" {
+plug "/tmp/local-b" local=#true name="local-b"
+plug "git@github.com:user/alpha.git" name="renamed-alpha" opt-prefix="ignored_" {
     opt "theme" "light"
 }
-plugin "https://github.com/user/beta.git"
+plug "https://github.com/user/beta.git"
 "#,
     )
     .unwrap();
@@ -49,10 +49,10 @@ plugin "https://github.com/user/beta.git"
 
 #[test]
 fn runtime_declarations_do_not_affect_plugin_or_config_fingerprints() {
-    let without_runtime_declarations = parse_config(r#"plugin "user/repo""#).unwrap();
+    let without_runtime_declarations = parse_config(r#"plug "user/repo""#).unwrap();
     let first = parse_config(
         r##"
-plugin "user/repo" {
+plug "user/repo" {
     env "MODE" "one"
     unset-env "LEGACY"
     bind "C-w" {
@@ -65,7 +65,7 @@ plugin "user/repo" {
     .unwrap();
     let second = parse_config(
         r#"
-plugin "user/repo" {
+plug "user/repo" {
     unset-env "MODE"
     env "MODE" "two"
     bind "M-x" {
@@ -91,8 +91,8 @@ plugin "user/repo" {
 
 #[test]
 fn config_fingerprint_changes_when_build_changes() {
-    let cfg_a = parse_config(r#"plugin "user/repo" build="make install""#).unwrap();
-    let cfg_b = parse_config(r#"plugin "user/repo" build="just build""#).unwrap();
+    let cfg_a = parse_config(r#"plug "user/repo" build="make install""#).unwrap();
+    let cfg_b = parse_config(r#"plug "user/repo" build="just build""#).unwrap();
 
     assert_ne!(config_fingerprint(&cfg_a), config_fingerprint(&cfg_b));
 }
@@ -102,11 +102,11 @@ fn sync_fingerprint_config_mode_uses_merged_kdl_precedence() {
     let dir = tempdir().unwrap();
     let kdl = dir.path().join("tmup.kdl");
     let tmux_conf = dir.path().join("tmux.conf");
-    write_file(&kdl, r#"plugin "tmux-plugins/tmux-sensible" branch="feature""#);
+    write_file(&kdl, r#"plug "tmux-plugins/tmux-sensible" branch="feature""#);
     write_file(&tmux_conf, "set -g @plugin 'tmux-plugins/tmux-sensible'\n");
 
     let loaded = load_from_sources(ConfigMode::Mixed, Some(&kdl), Some(&tmux_conf)).unwrap();
-    let expected = parse_config(r#"plugin "tmux-plugins/tmux-sensible" branch="feature""#).unwrap();
+    let expected = parse_config(r#"plug "tmux-plugins/tmux-sensible" branch="feature""#).unwrap();
 
     assert_eq!(config_fingerprint(&loaded.config), config_fingerprint(&expected));
 }
@@ -116,8 +116,8 @@ fn enable_condition_expression_text_does_not_affect_fingerprints() {
     let dir = tempdir().unwrap();
     let first = dir.path().join("first/tmup.kdl");
     let second = dir.path().join("second/tmup.kdl");
-    write_file(&first, r#"plugin "user/repo" enabled="exit 0""#);
-    write_file(&second, r#"plugin "user/repo" enabled="test 1 = 1""#);
+    write_file(&first, r#"plug "user/repo" enabled="exit 0""#);
+    write_file(&second, r#"plug "user/repo" enabled="test 1 = 1""#);
 
     let first = load_from_sources(ConfigMode::Pure, Some(&first), None).unwrap();
     let second = load_from_sources(ConfigMode::Pure, Some(&second), None).unwrap();
@@ -134,8 +134,8 @@ fn false_enable_condition_changes_effective_spec_and_fingerprint_membership() {
     let dir = tempdir().unwrap();
     let enabled = dir.path().join("enabled/tmup.kdl");
     let disabled = dir.path().join("disabled/tmup.kdl");
-    write_file(&enabled, r#"plugin "user/repo" enabled=#true"#);
-    write_file(&disabled, r#"plugin "user/repo" enabled=#false"#);
+    write_file(&enabled, r#"plug "user/repo" enabled=#true"#);
+    write_file(&disabled, r#"plug "user/repo" enabled=#false"#);
 
     let enabled = load_from_sources(ConfigMode::Pure, Some(&enabled), None).unwrap();
     let disabled = load_from_sources(ConfigMode::Pure, Some(&disabled), None).unwrap();
@@ -150,8 +150,8 @@ fn load_conditions_do_not_affect_plugin_or_config_fingerprints() {
     let dir = tempdir().unwrap();
     let first = dir.path().join("first/tmup.kdl");
     let second = dir.path().join("second/tmup.kdl");
-    write_file(&first, r#"plugin "user/repo" cond=#false"#);
-    write_file(&second, r#"plugin "user/repo" cond="kill -TERM $$""#);
+    write_file(&first, r#"plug "user/repo" cond=#false"#);
+    write_file(&second, r#"plug "user/repo" cond="kill -TERM $$""#);
 
     let first = load_from_sources(ConfigMode::Pure, Some(&first), None).unwrap();
     let second = load_from_sources(ConfigMode::Pure, Some(&second), None).unwrap();
@@ -171,7 +171,7 @@ fn runtime_configuration_predicates_and_selected_contents_do_not_affect_fingerpr
     write_file(
         &first,
         r#"
-plugin "user/repo" {
+plug "user/repo" {
     if "exit 0" {
         bind "first" { shell "./first" }
     }
@@ -181,7 +181,7 @@ plugin "user/repo" {
     write_file(
         &second,
         r#"
-plugin "user/repo" {
+plug "user/repo" {
     if "test 1 = 1" {
         bind "second" { shell "./second" }
     }

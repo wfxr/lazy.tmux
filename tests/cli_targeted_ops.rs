@@ -11,8 +11,8 @@ fn write_config(root: &std::path::Path) -> std::path::PathBuf {
     std::fs::write(
         &config_path,
         concat!(
-            "plugin \"https://example.com/test/plugin.git\"\n",
-            "plugin \"https://example.com/bad/plugin.git\"\n",
+            "plug \"https://example.com/test/plugin.git\"\n",
+            "plug \"https://example.com/bad/plugin.git\"\n",
         ),
     )
     .unwrap();
@@ -102,7 +102,7 @@ fn restore_target_ignores_unrelated_sync_failures() {
 fn targeted_lifecycle_commands_reject_disabled_plugins_as_unknown() {
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("config/tmux/tmup.kdl");
-    write_file(&config_path, r#"plugin "https://example.com/test/plugin.git" enabled=#false"#);
+    write_file(&config_path, r#"plug "https://example.com/test/plugin.git" enabled=#false"#);
     let gitconfig = write_git_rewrite_config(dir.path());
 
     for command in ["sync", "install", "update", "restore"] {
@@ -122,7 +122,7 @@ fn standalone_lifecycle_commands_do_not_evaluate_load_conditions() {
     write_file(
         &config_path,
         r#"
-plugin "https://example.com/test/plugin.git" cond="kill -TERM $$" {
+plug "https://example.com/test/plugin.git" cond="kill -TERM $$" {
     if "kill -TERM $$" {
         bind "unreachable" { shell "./unreachable" }
     }

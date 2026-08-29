@@ -584,8 +584,8 @@ mod tests {
         std::fs::write(
             &config_path,
             r#"
-plugin "user/first" cond=#false
-plugin "user/second" cond=#true
+plug "user/first" cond=#false
+plug "user/second" cond=#true
 "#,
         )
         .unwrap();

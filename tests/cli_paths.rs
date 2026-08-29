@@ -30,7 +30,7 @@ fn cli_paths_list_reads_lockfile_next_to_override_config() {
     std::fs::create_dir_all(&xdg_config_dir).unwrap();
 
     let config_path = config_dir.join("custom.kdl");
-    std::fs::write(&config_path, r#"plugin "user/repo""#).unwrap();
+    std::fs::write(&config_path, r#"plug "user/repo""#).unwrap();
     std::fs::write(config_dir.join("tmup.lock"), r#"{"version":2,"plugins":{}}"#).unwrap();
     std::fs::write(xdg_config_dir.join("tmup.lock"), "not-json").unwrap();
 
@@ -50,7 +50,7 @@ fn cli_paths_sync_writes_lockfile_next_to_override_config() {
     std::fs::create_dir_all(&config_dir).unwrap();
 
     let config_path = config_dir.join("custom.kdl");
-    std::fs::write(&config_path, r#"plugin "https://example.com/test/plugin.git""#).unwrap();
+    std::fs::write(&config_path, r#"plug "https://example.com/test/plugin.git""#).unwrap();
 
     cargo_cmd(dir.path(), &config_path, &gitconfig).arg("sync").assert().success();
 
