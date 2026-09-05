@@ -1,6 +1,6 @@
 [package]
 name = "tmup"
-version = "0.3.0"
+version = "0.3.1-rc.1"
 edition = "2024"
 description = "A modern, config-driven tmux plugin manager"
 license = "MIT"
