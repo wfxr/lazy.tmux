@@ -1,6 +1,10 @@
+use std::io::{Read, Write};
+use std::os::fd::FromRawFd;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 use std::{env, fs};
 
 use tempfile::TempDir;
@@ -64,8 +68,11 @@ impl InstallerTest {
 output=
 url=
 authorization=
+progress=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --progress-bar) progress=true; shift ;;
+        --silent) progress=false; shift ;;
         --output)
             output=$2
             shift 2
@@ -97,6 +104,13 @@ if [ -f "$TMUP_TEST_FIXTURES/$fixture.exit" ]; then
     exit "$(cat "$TMUP_TEST_FIXTURES/$fixture.exit")"
 fi
 [ "$status" = 200 ] || exit 22
+if [ "$progress" = true ]; then
+    printf '\rdownload progress: %s\n' "$fixture" >&2
+    if [ "${TMUP_TEST_WAIT_FOR_PROGRESS:-}" = 1 ]; then
+        read -r acknowledgement
+        [ "$acknowledgement" = continue ] || exit 99
+    fi
+fi
 cp "$TMUP_TEST_FIXTURES/$fixture" "$output"
 "#,
         );
@@ -109,8 +123,12 @@ cp "$TMUP_TEST_FIXTURES/$fixture" "$output"
 output=
 url=
 authorization=
+progress=false
+log_output=
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --show-progress) progress=true; shift ;;
+        --output-file) log_output=$2; shift 2 ;;
         --output-document)
             output=$2
             shift 2
@@ -137,11 +155,22 @@ status=200
 if [ -f "$TMUP_TEST_FIXTURES/$fixture.status" ]; then
     status=$(cat "$TMUP_TEST_FIXTURES/$fixture.status")
 fi
-printf '  HTTP/1.1 302 Found\n  Location: https://example.test/asset\n  HTTP/1.1 %s Response\n' "$status" >&2
+if [ -n "$log_output" ]; then
+    printf '  HTTP/1.1 302 Found\n  Location: https://example.test/asset\n  HTTP/1.1 %s Response\n' "$status" >"$log_output"
+else
+    printf '  HTTP/1.1 302 Found\n  Location: https://example.test/asset\n  HTTP/1.1 %s Response\n' "$status" >&2
+fi
 if [ -f "$TMUP_TEST_FIXTURES/$fixture.exit" ]; then
     exit "$(cat "$TMUP_TEST_FIXTURES/$fixture.exit")"
 fi
 [ "$status" = 200 ] || exit 8
+if [ "$progress" = true ]; then
+    printf '\rdownload progress: %s\n' "$fixture" >&2
+    if [ "${TMUP_TEST_WAIT_FOR_PROGRESS:-}" = 1 ]; then
+        read -r acknowledgement
+        [ "$acknowledgement" = continue ] || exit 99
+    fi
+fi
 cp "$TMUP_TEST_FIXTURES/$fixture" "$output"
 "#,
         );
@@ -274,6 +303,9 @@ printf '1\n'
             .env("TMUP_TEST_HOST_ARCH", "x86_64")
             .env("TMUP_TEST_ROSETTA", "0")
             .env("HOME", self.root.path().join("home"))
+            .env("TERM", "xterm-256color")
+            .env_remove("NO_COLOR")
+            .env_remove("TMUP_TEST_WAIT_FOR_PROGRESS")
             .env_remove("GITHUB_TOKEN");
         command
     }
@@ -313,6 +345,206 @@ fn find_optional_command(name: &str) -> Option<PathBuf> {
     env::split_paths(&env::var_os("PATH").unwrap())
         .map(|directory| directory.join(name))
         .find(|path| path.is_file())
+}
+
+fn run_with_terminal_stderr(command: &mut Command, wait_for_progress: bool) -> Output {
+    let mut master = -1;
+    let mut slave = -1;
+    // SAFETY: openpty initializes both descriptors; the optional arguments are null.
+    let result = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    assert_eq!(result, 0, "openpty: {}", std::io::Error::last_os_error());
+    // SAFETY: each newly opened descriptor is transferred to exactly one File.
+    let (mut master, slave) =
+        unsafe { (fs::File::from_raw_fd(master), fs::File::from_raw_fd(slave)) };
+    let mut child =
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(slave).spawn().unwrap();
+    // Command retains its copy of the slave. Close it so the reader can observe EOF.
+    command.stderr(Stdio::null());
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            match master.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    output.extend_from_slice(&buffer[..count]);
+                    if output
+                        .windows(b"download progress:".len())
+                        .any(|w| w == b"download progress:")
+                    {
+                        let _ = progress_tx.send(());
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                // Linux reports EIO when the final slave closes; macOS returns EOF.
+                Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+                Err(error) => panic!("reading installer terminal: {error}"),
+            }
+        }
+        output
+    });
+    if wait_for_progress {
+        if let Err(error) = progress_rx.recv_timeout(Duration::from_secs(10)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("download progress was not visible before completion: {error}");
+        }
+        child.stdin.take().unwrap().write_all(b"continue\n").unwrap();
+    }
+    let mut output = child.wait_with_output().unwrap();
+    output.stderr = reader.join().unwrap();
+    output
+}
+
+#[test]
+fn redirected_installation_reports_ordered_plain_stages_only_on_stderr() {
+    for use_wget in [false, true] {
+        let test = InstallerTest::new();
+        if use_wget {
+            test.remove_tool("curl");
+        }
+        test.add_latest_release("1.2.3", TARGET, "new tmup\n");
+        let destination = test.root.path().join("destination");
+        let output = test.run(&["--to", destination.to_str().unwrap()]);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{stderr}");
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            stderr,
+            format!(
+                "[info] Resolving the latest stable release...\n\
+                 [info] Downloading tmup-v1.2.3-{TARGET}.tar.gz...\n\
+                 [info] Extracting tmup-v1.2.3-{TARGET}.tar.gz...\n\
+                 [info] Installing tmup to {0}/tmup...\n\
+                 [info] Installed tmup v1.2.3 to {0}/tmup\n\
+                 [warn] {0} is not in PATH; add it to run tmup directly\n",
+                destination.display()
+            )
+        );
+    }
+}
+
+#[test]
+fn terminal_download_progress_is_visible_before_completion_with_piped_stdin_and_stdout() {
+    for use_wget in [false, true] {
+        let test = InstallerTest::new();
+        if use_wget {
+            test.remove_tool("curl");
+        }
+        test.add_latest_release("1.2.3", TARGET, "new tmup\n");
+        let destination = test.root.path().join("destination");
+        let mut command = test.command(&["--to", destination.to_str().unwrap()]);
+        command.env("TMUP_TEST_WAIT_FOR_PROGRESS", "1");
+        let output = run_with_terminal_stderr(&mut command, true);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{stderr}");
+        assert!(output.stdout.is_empty());
+        assert!(stderr.contains("\x1b[1;32m[info]\x1b[0m Resolving"), "{stderr}");
+        assert!(stderr.contains("\x1b[1;33m[warn]\x1b[0m"), "{stderr}");
+        assert_eq!(stderr.matches("download progress:").count(), 1, "{stderr}");
+        let progress =
+            stderr.find(&format!("download progress: tmup-v1.2.3-{TARGET}.tar.gz")).unwrap();
+        assert!(progress < stderr.find("Extracting").unwrap());
+        assert_eq!(fs::read_to_string(destination.join("tmup")).unwrap(), "new tmup\n");
+        test.assert_temporary_storage_is_empty();
+    }
+}
+
+#[test]
+fn terminal_messages_respect_no_color_and_dumb_term() {
+    for (variable, value) in [("NO_COLOR", "1"), ("TERM", "dumb")] {
+        let test = InstallerTest::new();
+        test.add_release("1.2.3", TARGET, "new tmup\n");
+        let destination = test.root.path().join("destination");
+        let mut command =
+            test.command(&["--version", "1.2.3", "--to", destination.to_str().unwrap()]);
+        command.env(variable, value);
+        let output = run_with_terminal_stderr(&mut command, false);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{stderr}");
+        assert!(!stderr.contains('\x1b'), "{stderr}");
+        assert!(stderr.contains("[info] Installed"), "{stderr}");
+        assert!(stderr.contains("[warn]"), "{stderr}");
+        assert!(!stderr.contains("Resolving"), "{stderr}");
+
+        let output =
+            run_with_terminal_stderr(test.command(&["--unknown"]).env(variable, value), false);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(!output.status.success());
+        assert_eq!(stderr, "[erro] unknown argument: --unknown\r\n");
+    }
+}
+
+#[test]
+fn errors_use_the_error_prefix_and_terminal_color() {
+    let test = InstallerTest::new();
+    let output = test.run(&["--unknown"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "[erro] unknown argument: --unknown\n");
+
+    let output = run_with_terminal_stderr(&mut test.command(&["--unknown"]), false);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "\x1b[1;31m[erro]\x1b[0m unknown argument: --unknown\r\n"
+    );
+}
+
+#[test]
+fn terminal_downloads_only_fall_back_for_http_404_and_preserve_failed_installs() {
+    for use_wget in [false, true] {
+        for (http_status, exit_status, fallback) in
+            [("404", None, true), ("403", None, false), ("404", Some("4"), false)]
+        {
+            let test = InstallerTest::new();
+            test.link_command("xz");
+            if use_wget {
+                test.remove_tool("curl");
+            }
+            test.add_release("1.2.3", TARGET, "new tmup\n");
+            let name = format!("tmup-v1.2.3-{TARGET}.tar.xz");
+            fs::write(test.fixtures_dir.join(format!("{name}.status")), http_status).unwrap();
+            if let Some(exit_status) = exit_status {
+                fs::write(test.fixtures_dir.join(format!("{name}.exit")), exit_status).unwrap();
+            }
+            let destination = test.root.path().join("destination");
+            fs::create_dir(&destination).unwrap();
+            test.write_executable(&destination.join("tmup"), "existing tmup\n");
+            let output = run_with_terminal_stderr(
+                &mut test.command(&[
+                    "--version",
+                    "1.2.3",
+                    "--to",
+                    destination.to_str().unwrap(),
+                    "--force",
+                ]),
+                false,
+            );
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert_eq!(output.status.success(), fallback, "{stderr}");
+            assert_eq!(stderr.contains("xz asset not found; downloading"), fallback, "{stderr}");
+            assert_eq!(stderr.contains("Installed tmup"), fallback, "{stderr}");
+            assert_eq!(stderr.contains("failed to download"), !fallback, "{stderr}");
+            assert_eq!(
+                fs::read_to_string(destination.join("tmup")).unwrap(),
+                if fallback { "new tmup\n" } else { "existing tmup\n" }
+            );
+            let downloads = fs::read_to_string(&test.download_log).unwrap();
+            assert_eq!(downloads.contains(".tar.gz"), fallback);
+            test.assert_temporary_storage_is_empty();
+        }
+    }
 }
 
 #[test]

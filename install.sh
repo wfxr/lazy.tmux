@@ -20,8 +20,23 @@ release_target_for_host() {
 }
 # END GENERATED RELEASE TARGETS
 
+log() {
+    log_level=$1
+    log_color=$2
+    shift 2
+    if [ -t 2 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; then
+        printf '\033[1;%sm[%s]\033[0m %s\n' "$log_color" "$log_level" "$*" >&2
+    else
+        printf '[%s] %s\n' "$log_level" "$*" >&2
+    fi
+}
+
+info() { log info 32 "$@"; }
+warn() { log warn 33 "$@"; }
+erro() { log erro 31 "$@"; }
+
 die() {
-    printf 'tmup installer: %s\n' "$*" >&2
+    erro "$@"
     exit 1
 }
 
@@ -47,20 +62,42 @@ download() {
     download_url=$1
     download_output=$2
     download_authorization=${3:-}
+    download_progress=false
+    if [ "${4:-false}" = true ] && [ -t 2 ]; then
+        download_progress=true
+    fi
     download_not_found=false
+    download_errors="${tmp_dir}/download-errors"
 
     case "$downloader" in
-    curl) set -- curl --fail --location --silent --show-error --write-out '%{http_code}' --output "$download_output" ;;
-    wget) set -- wget --quiet --server-response --output-document "$download_output" ;;
+    curl)
+        set -- curl --fail --location --show-error --write-out '%{http_code}' --output "$download_output"
+        if [ "$download_progress" = true ]; then
+            set -- "$@" --progress-bar
+        else
+            set -- "$@" --silent
+        fi
+        ;;
+    wget)
+        # Keep response headers available for 404 detection while wget sends its
+        # native progress directly to stderr, even with logging redirected.
+        set -- wget --quiet --server-response --output-file "$download_errors" --output-document "$download_output"
+        if [ "$download_progress" = true ]; then
+            set -- "$@" --show-progress --progress=bar:force
+        fi
+        ;;
     esac
     if [ -n "$download_authorization" ]; then
         set -- "$@" --header "$download_authorization"
     fi
     download_status=0
-    download_errors="${tmp_dir}/download-errors"
     case "$downloader" in
     curl)
-        download_http_status=$("$@" "$download_url" 2>"$download_errors") || download_status=$?
+        if [ "$download_progress" = true ]; then
+            download_http_status=$("$@" "$download_url") || download_status=$?
+        else
+            download_http_status=$("$@" "$download_url" 2>"$download_errors") || download_status=$?
+        fi
         # Only an HTTP 404 permits trying an older release's gzip asset.
         if [ "$download_status" -eq 22 ] && [ "$download_http_status" = 404 ]; then
             download_not_found=true
@@ -68,7 +105,7 @@ download() {
         fi
         ;;
     wget)
-        LC_ALL=C "$@" "$download_url" 2>"$download_errors" || download_status=$?
+        LC_ALL=C "$@" "$download_url" || download_status=$?
         download_http_status=$(awk '$1 ~ /^HTTP\// { status = $2 } END { print status }' "$download_errors")
         if [ "$download_status" -eq 8 ] && [ "$download_http_status" = 404 ]; then
             download_not_found=true
@@ -77,7 +114,9 @@ download() {
         ;;
     esac
     if [ "$download_status" -ne 0 ]; then
-        cat "$download_errors" >&2
+        if [ "$downloader" = wget ] || [ "$download_progress" = false ]; then
+            cat "$download_errors" >&2
+        fi
     fi
     return "$download_status"
 }
@@ -111,14 +150,14 @@ validate_target() {
     die "unsupported target ${target}; supported targets: ${SUPPORTED_TARGETS}"
 }
 
+# ShellCheck 0.11 can lose track of earlier function definitions in these branches.
+# shellcheck disable=SC2218
 detect_target() {
     if ! host_os=$(uname -s); then
-        printf 'tmup installer: could not detect the host operating system; supported targets: %s\n' "$SUPPORTED_TARGETS" >&2
-        exit 1
+        die "could not detect the host operating system; supported targets: ${SUPPORTED_TARGETS}"
     fi
     if ! host_arch=$(uname -m); then
-        printf 'tmup installer: could not detect the host architecture; supported targets: %s\n' "$SUPPORTED_TARGETS" >&2
-        exit 1
+        die "could not detect the host architecture; supported targets: ${SUPPORTED_TARGETS}"
     fi
 
     if [ "$host_os" = Darwin ] && [ "$host_arch" = x86_64 ]; then
@@ -196,6 +235,7 @@ parse_args() {
     done
 }
 
+# shellcheck disable=SC2218
 main() {
     version=
     target=
@@ -260,12 +300,10 @@ main() {
         if [ -n "${GITHUB_TOKEN:-}" ]; then
             latest_authorization="Authorization: Bearer ${GITHUB_TOKEN}"
         fi
-        # ShellCheck 0.11's data-flow analysis does not see the earlier definition here.
-        # shellcheck disable=SC2218
+        info "Resolving the ${latest_release_description}..."
         download "$latest_release_url" "$latest_release_path" "$latest_authorization" || latest_download_status=$?
         if [ "$latest_download_status" -ne 0 ]; then
-            printf 'tmup installer: failed to resolve the %s\n' "$latest_release_description" >&2
-            exit 1
+            die "failed to resolve the ${latest_release_description}"
         fi
         if [ "$include_prerelease" = true ]; then
             version=$(awk '
@@ -308,18 +346,21 @@ match($0, /"tag_name"[[:space:]]*:[[:space:]]*"/) {
         archive_name="${archive_dir}.tar.xz"
     fi
     archive_path="${tmp_dir}/${archive_name}"
-    if download "${release_url}/${archive_name}" "$archive_path"; then
+    info "Downloading ${archive_name}..."
+    if download "${release_url}/${archive_name}" "$archive_path" '' true; then
         :
     else
         if [ "$download_not_found" = true ] && [ "$archive_name" = "${archive_dir}.tar.xz" ]; then
             archive_name="${archive_dir}.tar.gz"
             archive_path="${tmp_dir}/${archive_name}"
-            download "${release_url}/${archive_name}" "$archive_path" || die "failed to download ${archive_name}"
+            info "xz asset not found; downloading ${archive_name}..."
+            download "${release_url}/${archive_name}" "$archive_path" '' true || die "failed to download ${archive_name}"
         else
             die "failed to download ${archive_name}"
         fi
     fi
 
+    info "Extracting ${archive_name}..."
     # Decode xz separately so tar does not need xz support of its own.
     compression=z
     case "$archive_name" in
@@ -361,6 +402,7 @@ match($0, /"tag_name"[[:space:]]*:[[:space:]]*"/) {
     [ ! -L "$extracted_binary" ] || die "archive tmup binary must not be a symlink"
     [ -x "$extracted_binary" ] || die "archive tmup binary is not executable"
 
+    info "Installing tmup to ${destination_binary}..."
     mkdir -p "$destination" || die "could not create destination directory: ${destination}"
     if [ -d "$destination_binary" ] && [ ! -L "$destination_binary" ]; then
         die "cannot replace directory: ${destination_binary}"
@@ -381,10 +423,10 @@ match($0, /"tag_name"[[:space:]]*:[[:space:]]*"/) {
     fi
     install_tmp=
 
-    printf 'Installed tmup v%s to %s/tmup\n' "$version" "$destination"
+    info "Installed tmup v${version} to ${destination_binary}"
     case ":${PATH:-}:" in
     *":${destination}:"*) ;;
-    *) printf 'tmup installer: warning: %s is not in PATH; add it to run tmup directly\n' "$destination" >&2 ;;
+    *) warn "${destination} is not in PATH; add it to run tmup directly" ;;
     esac
 }
 
