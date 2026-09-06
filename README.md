@@ -43,9 +43,9 @@ features.
 
 ## Requirements
 
-tmup requires `tmux` and `git`. The remote installer also requires `curl` or
-`wget`, `tar`, and either `sha256sum` or `shasum`. Configurations that use shell
-predicates, remote build commands, or plugin-scoped bindings require `/bin/sh`.
+tmup requires `tmux` and `git`. The remote installer also requires `tar` and
+either `curl` or `wget`. Configurations that use shell predicates, remote
+build commands, or plugin-scoped bindings require `/bin/sh`.
 
 Pre-built binaries are available for 64-bit Linux and macOS. Linux releases
 use MUSL and work across common Linux distributions.
@@ -58,10 +58,9 @@ Install the latest stable release with the repository-owned installer:
 curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/wfxr/tmup/main/install.sh | sh
 ```
 
-The installer selects your platform, verifies the archive against the
-release's `SHA256SUMS`, and installs `tmup` to `~/.local/bin`. Add that
-directory to `PATH` if it isn't already available to your shell and tmux
-server.
+The installer selects your platform, checks the archive layout, and installs
+`tmup` to `~/.local/bin`. Add that directory to `PATH` if it isn't already
+available to your shell and tmux server.
 
 If you have a Rust toolchain, you can install the crates.io release instead:
 
@@ -70,7 +69,7 @@ cargo install tmup --locked
 ```
 
 See the [installation guide](docs/installation.md) for installer options,
-supported targets, checksums, and GitHub artifact attestations.
+supported targets, and manual installation.
 
 ## Quick start
 
@@ -280,7 +279,7 @@ The guides separate everyday tasks from the project's precise behavioral
 contract:
 
 - [Installation](docs/installation.md) covers release channels, installer
-  options, supported systems, checksums, and attestations.
+  options, supported systems, and manual installation.
 - [Configuration](docs/configuration.md) defines the complete native KDL and
   mixed-mode configuration surface.
 - [Commands](docs/commands.md) explains lifecycle workflows, status output,

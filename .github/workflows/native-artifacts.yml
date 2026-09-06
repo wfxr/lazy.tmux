@@ -78,16 +78,16 @@ jobs:
           retention-days: 7
 
   publish:
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
     if: github.event_name == 'push' && github.ref_type == 'tag'
     needs:
       - test
       - package
     runs-on: ubuntu-24.04
     permissions:
-      actions: read
-      attestations: write
       contents: write
-      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -109,18 +109,7 @@ jobs:
           merge-multiple: true
       - name: Prepare complete release asset set
         run: scripts/release/prepare-assets.sh "${{ steps.release.outputs.tag }}" "$PWD/downloaded-artifacts" "$PWD/release"
-      - name: Generate provenance attestations
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: release/*
-      - name: Verify provenance attestations
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          for asset in release/*; do
-            gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY"
-          done
-      - name: Publish verified draft release
+      - name: Publish draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/release/publish-release.sh "${{ steps.release.outputs.tag }}" "$PWD/release"

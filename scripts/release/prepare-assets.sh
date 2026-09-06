@@ -69,20 +69,6 @@ for target in $targets; do
     done
 done
 
-(
-    cd "$staging_dir"
-    for target in $targets; do
-        for format in gz xz; do
-            sha256sum "tmup-v${version}-${target}.tar.$format"
-        done
-    done
-) >"$staging_dir/SHA256SUMS"
-
-(
-    cd "$staging_dir"
-    sha256sum --check SHA256SUMS >/dev/null
-)
-
 mv "$staging_dir" "$output_dir"
 trap - EXIT HUP INT TERM
 

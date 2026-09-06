@@ -176,12 +176,8 @@ struct FakeGh {
     bin_dir: PathBuf,
     state: PathBuf,
     assets: PathBuf,
-    lock_label: PathBuf,
-    run_status: PathBuf,
-    after_lock: PathBuf,
     after_archive: PathBuf,
     create_visibility_lag: PathBuf,
-    label_cleanup: PathBuf,
     log: PathBuf,
 }
 
@@ -190,22 +186,14 @@ impl FakeGh {
         let bin_dir = root.join("bin");
         let state = root.join("gh-state");
         let assets = root.join("gh-assets");
-        let lock_label = root.join("gh-lock-label");
-        let run_status = root.join("gh-run-status");
-        let after_lock = root.join("gh-after-lock");
         let after_archive = root.join("gh-after-archive");
         let create_visibility_lag = root.join("gh-create-visibility-lag");
-        let label_cleanup = root.join("gh-label-cleanup");
         let log = root.join("gh.log");
         std::fs::create_dir(&bin_dir).unwrap();
         std::fs::write(&state, format!("{initial_state}\n")).unwrap();
         std::fs::write(root.join("gh-prerelease"), "false\n").unwrap();
-        std::fs::write(&lock_label, "\n").unwrap();
-        std::fs::write(&run_status, "in_progress\n").unwrap();
-        std::fs::write(&after_lock, "none\n").unwrap();
         std::fs::write(&after_archive, "none\n").unwrap();
         std::fs::write(&create_visibility_lag, "0\n").unwrap();
-        std::fs::write(&label_cleanup, "success\n").unwrap();
 
         let gh = bin_dir.join("gh");
         std::fs::write(
@@ -230,14 +218,6 @@ printf '%s\n' "$*" >> "$FAKE_GH_LOG"
 
 case "$1:$2" in
     api:*)
-        if [ "$2:$3" = "--method:PATCH" ]; then
-            [ "$4" = "repos/{owner}/{repo}/releases/assets/1" ] || exit 2
-            [ "$(cat "$FAKE_GH_STATE")" = public ] || exit 1
-            [ "$(cat "$FAKE_GH_LABEL_CLEANUP")" = success ] || exit 1
-            echo > "$FAKE_GH_LOCK_LABEL"
-            printf '{}\n'
-            exit 0
-        fi
         case "$2" in
             */releases/tags/*)
                 [ "$(cat "$FAKE_GH_STATE")" = public ] || exit 1
@@ -263,14 +243,10 @@ case "$1:$2" in
                     "$FAKE_GH_TAG" "$draft" "$(cat "$FAKE_GH_PRERELEASE")"
                 separator=
                 if [ -f "$FAKE_GH_ASSETS" ]; then
-                    while IFS="$(printf '\t')" read -r name asset_state digest; do
+                    while IFS="$(printf '\t')" read -r name asset_state; do
                         [ -n "$name" ] || continue
-                        label=
-                        if [ "$name" = SHA256SUMS ]; then
-                            label=$(cat "$FAKE_GH_LOCK_LABEL")
-                        fi
-                        printf '%s{"id":1,"name":"%s","state":"%s","digest":"%s","label":"%s"}' \
-                            "$separator" "$name" "$asset_state" "$digest" "$label"
+                        printf '%s{"name":"%s","state":"%s"}' \
+                            "$separator" "$name" "$asset_state"
                         separator=,
                     done < "$FAKE_GH_ASSETS"
                 fi
@@ -278,47 +254,8 @@ case "$1:$2" in
             fi
             exit 0
         fi
-        query=
-        previous=
-        for argument in "$@"; do
-            if [ "$previous" = --jq ]; then
-                query=$argument
-                break
-            fi
-            previous=$argument
-        done
-        case "$query" in
-            *'if length == 0'*)
-                cat "$FAKE_GH_STATE"
-                ;;
-            *'.[0].prerelease'*)
-                cat "$FAKE_GH_PRERELEASE"
-                ;;
-            *'select(.name == "SHA256SUMS")'*)
-                if [ -f "$FAKE_GH_ASSETS" ] &&
-                    awk -F '\t' '$1 == "SHA256SUMS" { found = 1 } END { exit !found }' "$FAKE_GH_ASSETS"; then
-                    digest=$(awk -F '\t' '$1 == "SHA256SUMS" { print $3 }' "$FAKE_GH_ASSETS")
-                    printf '%s\t%s\n' "$(cat "$FAKE_GH_LOCK_LABEL")" "$digest"
-                fi
-                ;;
-            *'.assets[].name')
-                if [ -f "$FAKE_GH_ASSETS" ]; then
-                    cut -f 1 "$FAKE_GH_ASSETS"
-                fi
-                ;;
-            *'.assets[] | [.name, .state, .digest] | @tsv')
-                if [ -f "$FAKE_GH_ASSETS" ]; then
-                    cat "$FAKE_GH_ASSETS"
-                fi
-                ;;
-            .status)
-                cat "$FAKE_GH_RUN_STATUS"
-                ;;
-            *)
-                echo "unsupported fake gh api query: $query" >&2
-                exit 2
-                ;;
-        esac
+        echo "unsupported fake gh api command: $*" >&2
+        exit 2
         ;;
     release:create)
         [ "$(cat "$FAKE_GH_STATE")" = missing ] || exit 1
@@ -335,37 +272,27 @@ case "$1:$2" in
         temporary="$FAKE_GH_ASSETS.tmp"
         awk -F '\t' -v name="$asset_name" '$1 != name' "$FAKE_GH_ASSETS" > "$temporary"
         mv "$temporary" "$FAKE_GH_ASSETS"
-        if [ "$asset_name" = SHA256SUMS ]; then
-            echo > "$FAKE_GH_LOCK_LABEL"
-        fi
         ;;
     release:upload)
         touch "$FAKE_GH_ASSETS"
         for argument in "$@"; do
-            path=${argument%%#*}
+            path=$argument
             if [ -f "$path" ]; then
                 name=$(basename "$path")
                 temporary="$FAKE_GH_ASSETS.tmp"
                 awk -F '\t' -v name="$name" '$1 != name' "$FAKE_GH_ASSETS" > "$temporary"
                 mv "$temporary" "$FAKE_GH_ASSETS"
-                digest=$(sha256sum "$path" | awk '{ print $1 }')
-                printf '%s\tuploaded\tsha256:%s\n' "$name" "$digest" >> "$FAKE_GH_ASSETS"
-                if [ "$name" = SHA256SUMS ]; then
-                    case "$argument" in
-                        *'#'*) printf '%s\n' "${argument#*#}" > "$FAKE_GH_LOCK_LABEL" ;;
-                        *) echo > "$FAKE_GH_LOCK_LABEL" ;;
-                    esac
-                    case "$(cat "$FAKE_GH_AFTER_LOCK")" in
-                        corrupt-lock) echo malformed-owner > "$FAKE_GH_LOCK_LABEL" ;;
-                        publish) echo public > "$FAKE_GH_STATE" ;;
-                    esac
-                else
-                    case "$(cat "$FAKE_GH_AFTER_ARCHIVE")" in
-                        corrupt-lock) echo tmup-publication-run-456-attempt-1 > "$FAKE_GH_LOCK_LABEL" ;;
-                    esac
-                fi
+                printf '%s\tuploaded\n' "$name" >> "$FAKE_GH_ASSETS"
+                [ "$(cat "$FAKE_GH_AFTER_ARCHIVE")" != fail ] || exit 1
             fi
         done
+        case "$(cat "$FAKE_GH_AFTER_ARCHIVE")" in
+            publish) echo public > "$FAKE_GH_STATE" ;;
+            missing) sed '1d' "$FAKE_GH_ASSETS" > "$FAKE_GH_ASSETS.tmp"; mv "$FAKE_GH_ASSETS.tmp" "$FAKE_GH_ASSETS" ;;
+            incomplete) sed 's/uploaded/starter/' "$FAKE_GH_ASSETS" > "$FAKE_GH_ASSETS.tmp"; mv "$FAKE_GH_ASSETS.tmp" "$FAKE_GH_ASSETS" ;;
+            extra) printf 'unexpected.tar.gz\tuploaded\n' >> "$FAKE_GH_ASSETS" ;;
+            duplicate) head -n 1 "$FAKE_GH_ASSETS" > "$FAKE_GH_ASSETS.tmp"; cat "$FAKE_GH_ASSETS.tmp" >> "$FAKE_GH_ASSETS"; rm "$FAKE_GH_ASSETS.tmp" ;;
+        esac
         ;;
     release:edit)
         for argument in "$@"; do
@@ -399,12 +326,8 @@ esac
             bin_dir,
             state,
             assets,
-            lock_label,
-            run_status,
-            after_lock,
             after_archive,
             create_visibility_lag,
-            label_cleanup,
             log,
         }
     }
@@ -425,14 +348,10 @@ esac
             .env("FAKE_GH_PRERELEASE", self.root.join("gh-prerelease"))
             .env("FAKE_GH_ASSETS", &self.assets)
             .env("FAKE_GH_LOG", &self.log)
-            .env("FAKE_GH_LOCK_LABEL", &self.lock_label)
-            .env("FAKE_GH_RUN_STATUS", &self.run_status)
-            .env("FAKE_GH_AFTER_LOCK", &self.after_lock)
             .env("FAKE_GH_AFTER_ARCHIVE", &self.after_archive)
             .env("FAKE_GH_CREATE_VISIBILITY_LAG", &self.create_visibility_lag)
-            .env("FAKE_GH_LABEL_CLEANUP", &self.label_cleanup)
-            .env("GITHUB_RUN_ID", "123")
-            .env("GITHUB_RUN_ATTEMPT", "1");
+            .env_remove("GITHUB_RUN_ID")
+            .env_remove("GITHUB_RUN_ATTEMPT");
         command
     }
 
@@ -448,19 +367,6 @@ esac
         std::fs::read_to_string(&self.log).unwrap()
     }
 
-    fn set_lock(&self, label: &str, digest: &str) {
-        std::fs::write(&self.assets, format!("SHA256SUMS\tuploaded\tsha256:{digest}\n")).unwrap();
-        std::fs::write(&self.lock_label, format!("{label}\n")).unwrap();
-    }
-
-    fn set_run_status(&self, status: &str) {
-        std::fs::write(&self.run_status, format!("{status}\n")).unwrap();
-    }
-
-    fn after_lock(&self, action: &str) {
-        std::fs::write(&self.after_lock, format!("{action}\n")).unwrap();
-    }
-
     fn after_archive(&self, action: &str) {
         std::fs::write(&self.after_archive, format!("{action}\n")).unwrap();
     }
@@ -468,16 +374,6 @@ esac
     fn delay_created_release_visibility(&self, queries: u32) {
         std::fs::write(&self.create_visibility_lag, format!("{queries}\n")).unwrap();
     }
-
-    fn fail_label_cleanup(&self) {
-        std::fs::write(&self.label_cleanup, "failure\n").unwrap();
-    }
-}
-
-fn sha256(path: &std::path::Path) -> String {
-    let output = std::process::Command::new("sha256sum").arg(path).output().unwrap();
-    assert!(output.status.success());
-    String::from_utf8(output.stdout).unwrap().split_whitespace().next().unwrap().to_string()
 }
 
 #[test]
@@ -684,7 +580,7 @@ fn packaging_rejects_a_binary_with_a_different_version() {
 }
 
 #[test]
-fn release_asset_preparation_generates_the_complete_checksum_manifest() {
+fn release_asset_preparation_contains_only_the_complete_archive_set() {
     let temp = tempfile::tempdir().unwrap();
     let downloads = package_release_archives(temp.path());
     let release = temp.path().join("release");
@@ -709,36 +605,9 @@ fn release_asset_preparation_generates_the_complete_checksum_manifest() {
         .flat_map(|target| {
             ["gz", "xz"].map(|format| format!("tmup-v{version}-{target}.tar.{format}"))
         })
-        .chain(std::iter::once("SHA256SUMS".to_string()))
         .collect::<Vec<_>>();
     expected_names.sort();
     assert_eq!(asset_names, expected_names);
-
-    let checksum_manifest = std::fs::read_to_string(release.join("SHA256SUMS")).unwrap();
-    let checksum_names = checksum_manifest
-        .lines()
-        .map(|line| line.split_whitespace().nth(1).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        checksum_names,
-        targets
-            .iter()
-            .flat_map(|target| ["gz", "xz"]
-                .map(|format| format!("tmup-v{version}-{target}.tar.{format}")))
-            .collect::<Vec<_>>()
-    );
-
-    let verification = std::process::Command::new("sha256sum")
-        .arg("--check")
-        .arg("SHA256SUMS")
-        .current_dir(&release)
-        .output()
-        .unwrap();
-    assert!(
-        verification.status.success(),
-        "generated checksum manifest should verify: {}",
-        String::from_utf8_lossy(&verification.stderr)
-    );
 }
 
 #[test]
@@ -754,7 +623,7 @@ fn release_asset_preparation_does_not_execute_native_binaries() {
         .assert()
         .success();
 
-    assert!(release.join("SHA256SUMS").is_file());
+    assert_eq!(std::fs::read_dir(&release).unwrap().count(), release_targets().len() * 2);
 }
 
 #[test]
@@ -876,42 +745,6 @@ fn release_publication_stages_assets_before_making_the_release_public() {
 }
 
 #[test]
-fn release_publication_clears_the_internal_lock_label_after_publishing() {
-    let temp = tempfile::tempdir().unwrap();
-    let release = prepare_release_assets(temp.path());
-    let fake_gh = FakeGh::new(temp.path(), "missing");
-
-    fake_gh.publish(&release).assert().success();
-
-    assert_eq!(std::fs::read_to_string(&fake_gh.lock_label).unwrap(), "\n");
-    let calls = fake_gh.calls();
-    let publish = calls.find("release edit").expect("draft should be published");
-    let cleanup = calls
-        .find("api --method PATCH repos/{owner}/{repo}/releases/assets/1 --raw-field label=")
-        .expect("internal lock label should be cleared");
-    assert!(publish < cleanup, "label was cleared before publication:\n{calls}");
-}
-
-#[test]
-fn release_publication_warns_if_the_public_lock_label_cannot_be_cleared() {
-    let temp = tempfile::tempdir().unwrap();
-    let release = prepare_release_assets(temp.path());
-    let fake_gh = FakeGh::new(temp.path(), "missing");
-    fake_gh.fail_label_cleanup();
-
-    fake_gh.publish(&release).assert().success().stderr(predicate::str::contains(format!(
-        "warning: published {}, but SHA256SUMS retains its internal publication label",
-        package_tag()
-    )));
-
-    assert_eq!(fake_gh.state(), "public\n");
-    assert_eq!(
-        std::fs::read_to_string(&fake_gh.lock_label).unwrap(),
-        "tmup-publication-run-123-attempt-1\n"
-    );
-}
-
-#[test]
 fn release_publication_waits_for_a_created_draft_to_become_visible() {
     let temp = tempfile::tempdir().unwrap();
     let release = prepare_release_assets(temp.path());
@@ -939,11 +772,8 @@ fn release_publication_repairs_the_existing_draft() {
     let temp = tempfile::tempdir().unwrap();
     let release = prepare_release_assets(temp.path());
     let fake_gh = FakeGh::new(temp.path(), "draft");
-    std::fs::write(
-        temp.path().join("gh-assets"),
-        "stale.txt\tuploaded\tsha256:0000000000000000000000000000000000000000000000000000000000000000\n",
-    )
-    .unwrap();
+    std::fs::write(temp.path().join("gh-assets"), "stale.txt\tuploaded\nSHA256SUMS\tuploaded\n")
+        .unwrap();
 
     fake_gh.publish(&release).assert().success();
 
@@ -973,128 +803,11 @@ fn release_publication_refuses_to_mutate_a_public_release() {
 }
 
 #[test]
-fn release_publication_refuses_to_race_an_active_tag_run() {
+fn release_publication_stops_if_the_draft_becomes_public_during_upload() {
     let temp = tempfile::tempdir().unwrap();
     let release = prepare_release_assets(temp.path());
     let fake_gh = FakeGh::new(temp.path(), "draft");
-    fake_gh.set_lock(
-        "tmup-publication-run-999-attempt-1",
-        "0000000000000000000000000000000000000000000000000000000000000000",
-    );
-
-    fake_gh
-        .publish(&release)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("publication run 999 is still active"));
-
-    assert_eq!(fake_gh.state(), "draft\n");
-    let calls = fake_gh.calls();
-    assert!(!calls.contains("release upload"));
-    assert!(!calls.contains("--draft=false"));
-}
-
-#[test]
-fn release_publication_takes_over_a_completed_run_lock() {
-    let temp = tempfile::tempdir().unwrap();
-    let release = prepare_release_assets(temp.path());
-    let fake_gh = FakeGh::new(temp.path(), "draft");
-    fake_gh.set_lock(
-        "tmup-publication-run-999-attempt-1",
-        "0000000000000000000000000000000000000000000000000000000000000000",
-    );
-    fake_gh.set_run_status("completed");
-
-    fake_gh.publish(&release).assert().success();
-
-    assert_eq!(fake_gh.state(), "public\n");
-    let calls = fake_gh.calls();
-    assert!(calls.contains("actions/runs/999"));
-    assert!(calls.contains("release delete-asset"));
-    assert!(calls.contains("release upload"));
-}
-
-#[test]
-fn release_publication_resumes_an_owned_attempt_without_replacing_its_lock() {
-    let temp = tempfile::tempdir().unwrap();
-    let release = prepare_release_assets(temp.path());
-    let fake_gh = FakeGh::new(temp.path(), "draft");
-    fake_gh.set_lock("tmup-publication-run-123-attempt-1", &sha256(&release.join("SHA256SUMS")));
-
-    fake_gh.publish(&release).assert().success();
-
-    assert_eq!(fake_gh.state(), "public\n");
-    let calls = fake_gh.calls();
-    assert!(!calls.contains(&format!("release delete-asset {} SHA256SUMS", package_tag())));
-    assert!(!calls.contains("SHA256SUMS#tmup-publication"));
-}
-
-#[test]
-fn release_publication_reacquires_a_lock_from_an_earlier_attempt() {
-    let temp = tempfile::tempdir().unwrap();
-    let release = prepare_release_assets(temp.path());
-    let fake_gh = FakeGh::new(temp.path(), "draft");
-    fake_gh.set_lock(
-        "tmup-publication-run-123-attempt-0",
-        "0000000000000000000000000000000000000000000000000000000000000000",
-    );
-
-    fake_gh.publish(&release).assert().success();
-
-    assert_eq!(fake_gh.state(), "public\n");
-    let calls = fake_gh.calls();
-    assert!(calls.contains(&format!("release delete-asset {} SHA256SUMS", package_tag())));
-    assert!(!calls.contains("actions/runs/123"));
-    assert!(calls.contains("SHA256SUMS#tmup-publication-run-123-attempt-1"));
-}
-
-#[test]
-fn release_publication_rejects_a_malformed_draft_owner() {
-    let temp = tempfile::tempdir().unwrap();
-    let release = prepare_release_assets(temp.path());
-    let fake_gh = FakeGh::new(temp.path(), "draft");
-    fake_gh.set_lock(
-        "manually-uploaded",
-        "0000000000000000000000000000000000000000000000000000000000000000",
-    );
-
-    fake_gh
-        .publish(&release)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("no valid publication owner"));
-
-    assert_eq!(fake_gh.state(), "draft\n");
-    let calls = fake_gh.calls();
-    assert!(!calls.contains("release upload"));
-    assert!(!calls.contains("--draft=false"));
-}
-
-#[test]
-fn release_publication_fails_if_atomic_lock_acquisition_is_lost() {
-    let temp = tempfile::tempdir().unwrap();
-    let release = prepare_release_assets(temp.path());
-    let fake_gh = FakeGh::new(temp.path(), "draft");
-    fake_gh.after_lock("corrupt-lock");
-
-    fake_gh
-        .publish(&release)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("failed to acquire draft publication ownership"));
-
-    assert_eq!(fake_gh.state(), "draft\n");
-    let calls = fake_gh.calls();
-    assert!(!calls.contains("--clobber"));
-    assert!(!calls.contains("--draft=false"));
-}
-
-#[test]
-fn release_publication_stops_if_the_draft_disappears_after_locking() {
-    let temp = tempfile::tempdir().unwrap();
-    let release = prepare_release_assets(temp.path());
-    let fake_gh = FakeGh::new(temp.path(), "draft");
-    fake_gh.after_lock("publish");
+    fake_gh.after_archive("publish");
 
     fake_gh.publish(&release).assert().failure().stderr(predicate::str::contains(format!(
         "release {} is no longer a draft",
@@ -1103,25 +816,6 @@ fn release_publication_stops_if_the_draft_disappears_after_locking() {
 
     assert_eq!(fake_gh.state(), "public\n");
     let calls = fake_gh.calls();
-    assert!(!calls.contains("--clobber"));
-}
-
-#[test]
-fn release_publication_stops_if_ownership_changes_before_publish() {
-    let temp = tempfile::tempdir().unwrap();
-    let release = prepare_release_assets(temp.path());
-    let fake_gh = FakeGh::new(temp.path(), "draft");
-    fake_gh.after_archive("corrupt-lock");
-
-    fake_gh
-        .publish(&release)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("draft publication ownership changed before publish"));
-
-    assert_eq!(fake_gh.state(), "draft\n");
-    let calls = fake_gh.calls();
-    assert!(calls.contains("--clobber"));
     assert!(!calls.contains("--draft=false"));
 }
 
@@ -1152,4 +846,55 @@ fn release_publication_marks_prereleases_without_replacing_latest() {
     assert!(calls[create..upload].contains("--latest=false"));
     assert!(calls[publish..].contains("--prerelease"));
     assert!(calls[publish..].contains("--latest=false"));
+}
+
+#[test]
+fn release_publication_rejects_incomplete_or_unexpected_uploaded_assets() {
+    for failure in ["missing", "incomplete", "extra", "duplicate"] {
+        let temp = tempfile::tempdir().unwrap();
+        let release = prepare_release_assets(temp.path());
+        let fake_gh = FakeGh::new(temp.path(), "draft");
+        fake_gh.after_archive(failure);
+
+        fake_gh.publish(&release).assert().failure().stderr(predicate::str::contains(
+            "uploaded release assets do not match the expected local asset set",
+        ));
+
+        assert_eq!(fake_gh.state(), "draft\n");
+        assert!(!fake_gh.calls().contains("--draft=false"));
+    }
+}
+
+#[test]
+fn release_publication_can_retry_a_partial_upload() {
+    let temp = tempfile::tempdir().unwrap();
+    let release = prepare_release_assets(temp.path());
+    let fake_gh = FakeGh::new(temp.path(), "missing");
+    fake_gh.after_archive("fail");
+
+    fake_gh.publish(&release).assert().failure();
+
+    assert_eq!(fake_gh.state(), "draft\n");
+    assert!(!fake_gh.calls().contains("--draft=false"));
+    assert_eq!(std::fs::read_to_string(&fake_gh.assets).unwrap().lines().count(), 1);
+
+    fake_gh.after_archive("none");
+    fake_gh.publish(&release).assert().success();
+
+    assert_eq!(fake_gh.state(), "public\n");
+    assert_eq!(
+        std::fs::read_to_string(&fake_gh.assets).unwrap().lines().count(),
+        release_targets().len() * 2
+    );
+}
+
+#[test]
+fn release_workflow_serializes_publication_by_tag_without_attestations() {
+    let workflow = include_str!("../.github/workflows/native-artifacts.yml");
+    let publish = workflow.split("  publish:\n").nth(1).unwrap();
+    assert!(publish.contains("    concurrency:\n      group: release-${{ github.ref }}\n      cancel-in-progress: false\n"));
+    assert!(publish.contains("if: github.event_name == 'push' && github.ref_type == 'tag'"));
+    assert!(!publish.contains("attest"));
+    assert!(!publish.contains("id-token:"));
+    assert!(!publish.contains("actions: read"));
 }

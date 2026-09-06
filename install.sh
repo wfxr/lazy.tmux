@@ -47,15 +47,39 @@ download() {
     download_url=$1
     download_output=$2
     download_authorization=${3:-}
+    download_not_found=false
 
     case "$downloader" in
-    curl) set -- curl --fail --location --silent --show-error --output "$download_output" ;;
-    wget) set -- wget --quiet --output-document "$download_output" ;;
+    curl) set -- curl --fail --location --silent --show-error --write-out '%{http_code}' --output "$download_output" ;;
+    wget) set -- wget --quiet --server-response --output-document "$download_output" ;;
     esac
     if [ -n "$download_authorization" ]; then
         set -- "$@" --header "$download_authorization"
     fi
-    "$@" "$download_url"
+    download_status=0
+    download_errors="${tmp_dir}/download-errors"
+    case "$downloader" in
+    curl)
+        download_http_status=$("$@" "$download_url" 2>"$download_errors") || download_status=$?
+        # Only an HTTP 404 permits trying an older release's gzip asset.
+        if [ "$download_status" -eq 22 ] && [ "$download_http_status" = 404 ]; then
+            download_not_found=true
+            return "$download_status"
+        fi
+        ;;
+    wget)
+        LC_ALL=C "$@" "$download_url" 2>"$download_errors" || download_status=$?
+        download_http_status=$(awk '$1 ~ /^HTTP\// { status = $2 } END { print status }' "$download_errors")
+        if [ "$download_status" -eq 8 ] && [ "$download_http_status" = 404 ]; then
+            download_not_found=true
+            return "$download_status"
+        fi
+        ;;
+    esac
+    if [ "$download_status" -ne 0 ]; then
+        cat "$download_errors" >&2
+    fi
+    return "$download_status"
 }
 
 validate_version() {
@@ -279,41 +303,21 @@ match($0, /"tag_name"[[:space:]]*:[[:space:]]*"/) {
 
     archive_dir="tmup-v${version}-${target}"
     release_url="${RELEASES_URL}/v${version}"
-    checksums_path="${tmp_dir}/SHA256SUMS"
-    expected_checksum_path="${tmp_dir}/EXPECTED_SHA256SUM"
-
-    download "${release_url}/SHA256SUMS" "$checksums_path" || die "failed to download SHA256SUMS"
     archive_name="${archive_dir}.tar.gz"
-    if command -v xz >/dev/null 2>&1 && xz --version >/dev/null 2>&1 &&
-        awk -v archive="${archive_dir}.tar.xz" '
-            $2 == archive || $2 == "*" archive { found = 1 }
-            END { exit !found }
-        ' "$checksums_path"; then
+    if command -v xz >/dev/null 2>&1 && xz --version >/dev/null 2>&1; then
         archive_name="${archive_dir}.tar.xz"
     fi
     archive_path="${tmp_dir}/${archive_name}"
-
-    awk -v archive="$archive_name" '
-    $2 == archive || $2 == "*" archive {
-        print $1 "  " archive
-        found = 1
-        exit
-    }
-    END {
-        if (!found) {
-            exit 1
-        }
-    }
-' "$checksums_path" >"$expected_checksum_path" || die "SHA256SUMS has no entry for ${archive_name}"
-
-    download "${release_url}/${archive_name}" "$archive_path" || die "failed to download ${archive_name}"
-
-    if command -v sha256sum >/dev/null 2>&1; then
-        (cd "$tmp_dir" && sha256sum -c "${expected_checksum_path##*/}") || die "checksum verification failed for ${archive_name}"
-    elif command -v shasum >/dev/null 2>&1; then
-        (cd "$tmp_dir" && shasum -a 256 -c "${expected_checksum_path##*/}") || die "checksum verification failed for ${archive_name}"
+    if download "${release_url}/${archive_name}" "$archive_path"; then
+        :
     else
-        die "sha256sum or shasum is required"
+        if [ "$download_not_found" = true ] && [ "$archive_name" = "${archive_dir}.tar.xz" ]; then
+            archive_name="${archive_dir}.tar.gz"
+            archive_path="${tmp_dir}/${archive_name}"
+            download "${release_url}/${archive_name}" "$archive_path" || die "failed to download ${archive_name}"
+        else
+            die "failed to download ${archive_name}"
+        fi
     fi
 
     # Decode xz separately so tar does not need xz support of its own.

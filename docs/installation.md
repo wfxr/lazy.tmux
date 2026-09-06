@@ -1,14 +1,14 @@
 # Install tmup
 
-This guide covers the supported installation methods, release targets, and verification steps. The remote installer is the shortest path for most users; crates.io and manual asset installation are available when you need a different workflow.
+This guide covers the supported installation methods, release targets, and installer options. The remote installer is the shortest path for most users; crates.io and manual asset installation are available when you need a different workflow.
 
-tmup requires `tmux` and `git` at runtime. Configurations that use shell predicates, remote build commands, or plugin-scoped bindings also require `/bin/sh`. The remote installer additionally requires `curl` or `wget`, `tar`, and either `sha256sum` or `shasum`.
+tmup requires `tmux` and `git` at runtime. Configurations that use shell predicates, remote build commands, or plugin-scoped bindings also require `/bin/sh`. The remote installer additionally requires `tar` and either `curl` or `wget`.
 
 ## Install the latest stable release
 
-The repository-owned installer downloads the latest stable GitHub release for your host. It fetches `SHA256SUMS` first, then prefers `.tar.xz` when the manifest includes that archive and a working `xz` command is available. Otherwise, it selects `.tar.gz`, including for older releases that only provide gzip. You don't need to install an extra decompression tool.
+The repository-owned installer downloads the latest stable GitHub release for your host. It prefers `.tar.xz` when a working `xz` command is available. If the xz asset returns HTTP 404, it downloads `.tar.gz` instead, supporting older releases that only provide gzip. Without a working `xz` command, it downloads `.tar.gz` directly. You don't need to install an extra decompression tool.
 
-The installer verifies the selected archive against `SHA256SUMS` and installs the executable to `~/.local/bin` by default. If the selected download, checksum verification, or extraction fails, installation stops without trying another format or replacing an existing binary.
+The installer checks the archive layout and installs the executable to `~/.local/bin` by default. Other download errors, including connection failures and HTTP errors other than the xz asset returning 404, stop installation. Decompression, layout, or extraction failures also stop installation without trying another format or replacing an existing binary.
 
 Run the installer over HTTPS:
 
@@ -58,11 +58,11 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/wfxr/tmu
   sh -s -- --to "$HOME/bin" --force
 ```
 
-Checksum verification is mandatory and has no disable option. The installer downloads into a temporary directory and changes the destination only after the archive matches `SHA256SUMS`.
+The installer downloads and extracts into a temporary directory. It stages the executable at the destination and replaces an existing binary only after all archive checks and staging succeed.
 
 ## Supported targets
 
-Pre-built releases cover four 64-bit Linux and macOS targets. Each target is published as both `.tar.gz` and `.tar.xz`, with both archives included in `SHA256SUMS`. The xz archives use ordinary LZMA2 compression without architecture-specific filters. Linux archives use MUSL so the same target works across common distributions.
+Pre-built releases cover four 64-bit Linux and macOS targets. Each target is published as both `.tar.gz` and `.tar.xz`. The xz archives use ordinary LZMA2 compression without architecture-specific filters. Linux archives use MUSL so the same target works across common distributions.
 
 | Host | Release target |
 |------|----------------|
@@ -101,13 +101,13 @@ cargo install --path . --locked
 
 This command installs the checked-out source, not the latest published release.
 
-## Verify assets manually
+## Install a release asset manually
 
-Manual installation lets you verify both the checksum manifest and GitHub's artifact attestations before installing the executable. The example below uses tmup `0.3.0` for Linux x86-64; change both variables for the release and host you need.
+Manual installation lets you download and extract a release archive yourself. The example below uses tmup `0.3.0` for Linux x86-64; change both variables for the release and host you need.
 
-### Download the release files
+### Download the archive
 
-Choose the archive name, then download it with the checksum manifest:
+Choose the archive name, then download it:
 
 ```sh
 version=0.3.0
@@ -117,40 +117,9 @@ archive="${archive_dir}.tar.gz"
 release_url="https://github.com/wfxr/tmup/releases/download/v${version}"
 
 curl --fail --location --remote-name "${release_url}/${archive}"
-curl --fail --location --remote-name "${release_url}/SHA256SUMS"
-grep -F "  ${archive}" SHA256SUMS > "${archive}.sha256"
 ```
 
-Inspect the generated checksum line before continuing. It must name the exact archive you downloaded.
-
-### Verify the checksum
-
-Use the SHA-256 command provided by your host. On Linux, run:
-
-```sh
-sha256sum --check "${archive}.sha256"
-```
-
-On macOS, run:
-
-```sh
-shasum -a 256 --check "${archive}.sha256"
-```
-
-Stop if verification fails. A checksum match proves that the archive matches the manifest in the same release; the attestation step ties both files to the repository's release workflow.
-
-### Verify GitHub attestations
-
-Install and authenticate the GitHub CLI, then verify the downloaded archive and checksum manifest against `wfxr/tmup`:
-
-```sh
-gh attestation verify "${archive}" --repo wfxr/tmup
-gh attestation verify SHA256SUMS --repo wfxr/tmup
-```
-
-The attestations identify the bytes produced by the release workflow. They don't promise that separate builds are bit-for-bit reproducible.
-
-### Install the verified executable
+### Install the executable
 
 Extract the versioned directory and copy its single executable to a directory in your `PATH`:
 
