@@ -29,7 +29,8 @@ is_expected_asset() {
         return 0
     fi
     for release_target in $targets; do
-        if [ "$candidate" = "tmup-v${version}-${release_target}.tar.gz" ]; then
+        if [ "$candidate" = "tmup-v${version}-${release_target}.tar.gz" ] ||
+            [ "$candidate" = "tmup-v${version}-${release_target}.tar.xz" ]; then
             return 0
         fi
     done
@@ -47,12 +48,14 @@ done
 
 expected_checksum_names=
 for target in $targets; do
-    name="tmup-v${version}-${target}.tar.gz"
-    path="$asset_dir/$name"
-    [ -f "$path" ] && [ ! -L "$path" ] || fail "missing local asset: $name"
-    "$script_dir/validate-archive.sh" --structure-only "$tag" "$target" "$path"
-    expected_checksum_names="${expected_checksum_names}${name}
+    for format in gz xz; do
+        name="tmup-v${version}-${target}.tar.$format"
+        path="$asset_dir/$name"
+        [ -f "$path" ] && [ ! -L "$path" ] || fail "missing local asset: $name"
+        "$script_dir/validate-archive.sh" --structure-only "$tag" "$target" "$path"
+        expected_checksum_names="${expected_checksum_names}${name}
 "
+    done
 done
 
 checksum_path="$asset_dir/SHA256SUMS"
@@ -204,7 +207,9 @@ done <"$temporary_dir/remote-names"
 
 set --
 for target in $targets; do
-    set -- "$@" "$asset_dir/tmup-v${version}-${target}.tar.gz"
+    for format in gz xz; do
+        set -- "$@" "$asset_dir/tmup-v${version}-${target}.tar.$format"
+    done
 done
 
 assert_draft

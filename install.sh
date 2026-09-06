@@ -278,14 +278,20 @@ match($0, /"tag_name"[[:space:]]*:[[:space:]]*"/) {
     fi
 
     archive_dir="tmup-v${version}-${target}"
-    archive_name="${archive_dir}.tar.gz"
     release_url="${RELEASES_URL}/v${version}"
-    archive_path="${tmp_dir}/${archive_name}"
     checksums_path="${tmp_dir}/SHA256SUMS"
     expected_checksum_path="${tmp_dir}/EXPECTED_SHA256SUM"
 
-    download "${release_url}/${archive_name}" "$archive_path" || die "failed to download ${archive_name}"
     download "${release_url}/SHA256SUMS" "$checksums_path" || die "failed to download SHA256SUMS"
+    archive_name="${archive_dir}.tar.gz"
+    if command -v xz >/dev/null 2>&1 && xz --version >/dev/null 2>&1 &&
+        awk -v archive="${archive_dir}.tar.xz" '
+            $2 == archive || $2 == "*" archive { found = 1 }
+            END { exit !found }
+        ' "$checksums_path"; then
+        archive_name="${archive_dir}.tar.xz"
+    fi
+    archive_path="${tmp_dir}/${archive_name}"
 
     awk -v archive="$archive_name" '
     $2 == archive || $2 == "*" archive {
@@ -300,6 +306,8 @@ match($0, /"tag_name"[[:space:]]*:[[:space:]]*"/) {
     }
 ' "$checksums_path" >"$expected_checksum_path" || die "SHA256SUMS has no entry for ${archive_name}"
 
+    download "${release_url}/${archive_name}" "$archive_path" || die "failed to download ${archive_name}"
+
     if command -v sha256sum >/dev/null 2>&1; then
         (cd "$tmp_dir" && sha256sum -c "${expected_checksum_path##*/}") || die "checksum verification failed for ${archive_name}"
     elif command -v shasum >/dev/null 2>&1; then
@@ -308,8 +316,18 @@ match($0, /"tag_name"[[:space:]]*:[[:space:]]*"/) {
         die "sha256sum or shasum is required"
     fi
 
+    # Decode xz separately so tar does not need xz support of its own.
+    compression=z
+    case "$archive_name" in
+        *.tar.xz)
+            xz -dc "$archive_path" >"${tmp_dir}/archive.tar" || die "could not decompress ${archive_name}"
+            archive_path="${tmp_dir}/archive.tar"
+            compression=
+            ;;
+    esac
+
     members_path="${tmp_dir}/ARCHIVE_MEMBERS"
-    tar -tzf "$archive_path" >"$members_path" || die "could not read ${archive_name}"
+    tar -t"$compression"f "$archive_path" >"$members_path" || die "could not read ${archive_name}"
     awk -v directory="${archive_dir}/" -v binary="${archive_dir}/tmup" '
     $0 == directory {
         directories += 1
@@ -331,7 +349,7 @@ match($0, /"tag_name"[[:space:]]*:[[:space:]]*"/) {
 
     extract_dir="${tmp_dir}/extract"
     mkdir "$extract_dir" || die "could not prepare archive extraction"
-    tar -xzf "$archive_path" -C "$extract_dir" "$archive_dir/tmup" || die "could not extract ${archive_name}"
+    tar -x"$compression"f "$archive_path" -C "$extract_dir" "$archive_dir/tmup" || die "could not extract ${archive_name}"
     extracted_binary="${extract_dir}/${archive_dir}/tmup"
     [ -d "${extract_dir}/${archive_dir}" ] || die "archive does not contain the expected directory"
     [ ! -L "${extract_dir}/${archive_dir}" ] || die "archive directory must not be a symlink"

@@ -33,7 +33,8 @@ for path in "$artifact_dir"/* "$artifact_dir"/.[!.]* "$artifact_dir"/..?*; do
     name=$(basename "$path")
     expected=false
     for target in $targets; do
-        if [ "$name" = "tmup-v${version}-${target}.tar.gz" ]; then
+        if [ "$name" = "tmup-v${version}-${target}.tar.gz" ] ||
+            [ "$name" = "tmup-v${version}-${target}.tar.xz" ]; then
             expected=true
             break
         fi
@@ -42,9 +43,11 @@ for path in "$artifact_dir"/* "$artifact_dir"/.[!.]* "$artifact_dir"/..?*; do
 done
 
 for target in $targets; do
-    name="tmup-v${version}-${target}.tar.gz"
-    source_path="$artifact_dir/$name"
-    [ -f "$source_path" ] && [ ! -L "$source_path" ] || fail "missing asset: $name"
+    for format in gz xz; do
+        name="tmup-v${version}-${target}.tar.$format"
+        source_path="$artifact_dir/$name"
+        [ -f "$source_path" ] && [ ! -L "$source_path" ] || fail "missing asset: $name"
+    done
 done
 
 if [ -e "$output_dir" ]; then
@@ -58,16 +61,20 @@ staging_dir=$(mktemp -d "$output_parent/.tmup-release.XXXXXX")
 trap 'rm -rf "$staging_dir"' EXIT HUP INT TERM
 
 for target in $targets; do
-    name="tmup-v${version}-${target}.tar.gz"
-    source_path="$artifact_dir/$name"
-    "$script_dir/validate-archive.sh" --structure-only "$tag" "$target" "$source_path"
-    cp "$source_path" "$staging_dir/$name"
+    for format in gz xz; do
+        name="tmup-v${version}-${target}.tar.$format"
+        source_path="$artifact_dir/$name"
+        "$script_dir/validate-archive.sh" --structure-only "$tag" "$target" "$source_path"
+        cp "$source_path" "$staging_dir/$name"
+    done
 done
 
 (
     cd "$staging_dir"
     for target in $targets; do
-        sha256sum "tmup-v${version}-${target}.tar.gz"
+        for format in gz xz; do
+            sha256sum "tmup-v${version}-${target}.tar.$format"
+        done
     done
 ) >"$staging_dir/SHA256SUMS"
 

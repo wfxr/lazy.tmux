@@ -34,13 +34,14 @@ fi
 target=$("$script_dir/validate-target.sh" "$target")
 
 package_name="tmup-v${version}-${target}"
-expected_archive_name="${package_name}.tar.gz"
-
 [ -f "$archive" ] || fail "file not found: $archive"
-[ "$(basename "$archive")" = "$expected_archive_name" ] ||
-    fail "expected filename $expected_archive_name"
+case "$(basename "$archive")" in
+    "$package_name.tar.gz") compression=z ;;
+    "$package_name.tar.xz") compression=J ;;
+    *) fail "expected filename $package_name.tar.gz or $package_name.tar.xz" ;;
+esac
 
-if ! listing=$(tar -tzf "$archive"); then
+if ! listing=$(tar -t"$compression"f "$archive"); then
     fail "cannot list $archive"
 fi
 expected_listing=$(printf '%s\n%s\n' "$package_name/" "$package_name/tmup")
@@ -49,7 +50,7 @@ expected_listing=$(printf '%s\n%s\n' "$package_name/" "$package_name/tmup")
 temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/tmup-archive.XXXXXX")
 trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
 
-if ! tar -xzf "$archive" -C "$temp_dir"; then
+if ! tar -x"$compression"f "$archive" -C "$temp_dir"; then
     fail "cannot extract $archive"
 fi
 

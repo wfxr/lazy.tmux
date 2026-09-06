@@ -224,6 +224,23 @@ printf '1\n'
         self.package_payload(version, target, &archive_dir);
     }
 
+    fn add_xz_archive(&self, version: &str, target: &str) {
+        let name = format!("tmup-v{version}-{target}.tar.xz");
+        let status = Command::new(find_command("tar"))
+            .arg("-cJf")
+            .arg(self.fixtures_dir.join(&name))
+            .arg("-C")
+            .arg(self.root.path().join("payload"))
+            .arg(format!("tmup-v{version}-{target}"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let manifest = self.fixtures_dir.join("SHA256SUMS");
+        let previous = fs::read_to_string(&manifest).unwrap();
+        let digest = checksum_output(&self.fixtures_dir.join(&name));
+        fs::write(manifest, format!("{previous}{digest}  {name}\n")).unwrap();
+    }
+
     fn add_latest_release(&self, version: &str, target: &str, binary: &str) {
         self.add_release(version, target, binary);
         self.write_latest_release(version);
@@ -361,9 +378,9 @@ fn installs_an_explicit_verified_release() {
     assert_eq!(
         fs::read_to_string(&test.download_log).unwrap(),
         concat!(
+            "curl https://github.com/wfxr/tmup/releases/download/v1.2.3/SHA256SUMS\n",
             "curl https://github.com/wfxr/tmup/releases/download/v1.2.3/",
             "tmup-v1.2.3-x86_64-unknown-linux-musl.tar.gz\n",
-            "curl https://github.com/wfxr/tmup/releases/download/v1.2.3/SHA256SUMS\n",
         )
     );
     assert_eq!(fs::read_to_string(&test.checksum_log).unwrap(), "sha256sum\n");
@@ -990,6 +1007,8 @@ fn force_replaces_a_symlink_to_a_directory() {
 #[test]
 fn archive_download_failure_preserves_an_existing_binary() {
     let test = InstallerTest::new();
+    test.add_release("1.2.3", TARGET, "new tmup\n");
+    fs::remove_file(test.archive_path("1.2.3", TARGET)).unwrap();
     let destination = test.root.path().join("destination");
     fs::create_dir(&destination).unwrap();
     test.write_executable(&destination.join("tmup"), "existing tmup\n");
@@ -1157,4 +1176,108 @@ fn archive_with_the_binary_outside_the_versioned_directory_is_rejected() {
     assert!(!output.status.success());
     assert!(!destination.exists());
     test.assert_temporary_storage_is_empty();
+}
+
+#[test]
+fn prefers_xz_without_downloading_gzip_with_curl_or_wget() {
+    for use_wget in [false, true] {
+        let test = InstallerTest::new();
+        test.link_command("xz");
+        let tar = find_command("tar");
+        test.remove_tool("tar");
+        test.write_executable(
+            &test.bin_dir.join("tar"),
+            &format!(
+                "#!/bin/sh\ncase \"$1\" in *J*) exit 99;; esac\nexec '{}' \"$@\"\n",
+                tar.display()
+            ),
+        );
+        if use_wget {
+            test.remove_tool("curl");
+        }
+        test.add_release("1.2.3", TARGET, "xz tmup\n");
+        test.add_xz_archive("1.2.3", TARGET);
+        let destination = test.root.path().join("destination");
+        let output = test.install("1.2.3", TARGET, &destination);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(fs::read_to_string(destination.join("tmup")).unwrap(), "xz tmup\n");
+        let downloads = fs::read_to_string(&test.download_log).unwrap();
+        assert!(downloads.lines().next().unwrap().ends_with("/SHA256SUMS"));
+        assert!(downloads.contains(".tar.xz"));
+        assert!(!downloads.contains(".tar.gz"));
+        test.assert_temporary_storage_is_empty();
+    }
+}
+
+#[test]
+fn uses_gzip_when_xz_is_missing_or_unusable() {
+    for broken_xz in [false, true] {
+        let test = InstallerTest::new();
+        if broken_xz {
+            test.write_executable(&test.bin_dir.join("xz"), "#!/bin/sh\nexit 1\n");
+        }
+        test.add_release("1.2.3", TARGET, "gzip tmup\n");
+        test.add_xz_archive("1.2.3", TARGET);
+        let destination = test.root.path().join("destination");
+        let output = test.install("1.2.3", TARGET, &destination);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let downloads = fs::read_to_string(&test.download_log).unwrap();
+        assert!(downloads.contains(".tar.gz"));
+        assert!(!downloads.contains(".tar.xz"));
+    }
+}
+
+#[test]
+fn uses_gzip_for_older_releases_even_when_xz_is_available() {
+    let test = InstallerTest::new();
+    test.link_command("xz");
+    test.add_release("1.2.3", TARGET, "old tmup\n");
+    let destination = test.root.path().join("destination");
+    assert!(test.install("1.2.3", TARGET, &destination).status.success());
+    let downloads = fs::read_to_string(&test.download_log).unwrap();
+    assert!(downloads.contains(".tar.gz"));
+    assert!(!downloads.contains(".tar.xz"));
+}
+
+#[test]
+fn xz_failures_preserve_existing_binary_without_downloading_gzip() {
+    for failure in ["download", "checksum", "decompression", "layout", "extraction"] {
+        let test = InstallerTest::new();
+        test.link_command("xz");
+        test.add_release("1.2.3", TARGET, "replacement tmup\n");
+        if failure == "layout" {
+            fs::write(test.payload_dir("1.2.3", TARGET).join("extra"), "unexpected").unwrap();
+        }
+        test.add_xz_archive("1.2.3", TARGET);
+        let name = format!("tmup-v1.2.3-{TARGET}.tar.xz");
+        let archive = test.fixtures_dir.join(&name);
+        match failure {
+            "download" => fs::remove_file(&archive).unwrap(),
+            "checksum" => fs::write(&archive, "tampered").unwrap(),
+            "decompression" => {
+                fs::write(&archive, "not xz").unwrap();
+                test.write_checksum(&name);
+            }
+            "extraction" => {
+                let tar = find_command("tar");
+                test.remove_tool("tar");
+                test.write_executable(
+                    &test.bin_dir.join("tar"),
+                    &format!(
+                        "#!/bin/sh\nif [ \"$1\" = -xf ]; then exit 1; fi\nexec '{}' \"$@\"\n",
+                        tar.display()
+                    ),
+                );
+            }
+            _ => {}
+        }
+        let destination = test.root.path().join("destination");
+        fs::create_dir(&destination).unwrap();
+        test.write_executable(&destination.join("tmup"), "existing tmup\n");
+        let output = test.force_install("1.2.3", TARGET, &destination);
+        assert!(!output.status.success(), "accepted {failure} failure");
+        assert_eq!(fs::read_to_string(destination.join("tmup")).unwrap(), "existing tmup\n");
+        assert!(!fs::read_to_string(&test.download_log).unwrap().contains(".tar.gz"));
+        test.assert_temporary_storage_is_empty();
+    }
 }

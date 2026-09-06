@@ -6,7 +6,9 @@ tmup requires `tmux` and `git` at runtime. Configurations that use shell predica
 
 ## Install the latest stable release
 
-The repository-owned installer downloads the latest stable GitHub release for your host. It verifies the selected archive against the release's `SHA256SUMS` and installs the executable to `~/.local/bin` by default.
+The repository-owned installer downloads the latest stable GitHub release for your host. It fetches `SHA256SUMS` first, then prefers `.tar.xz` when the manifest includes that archive and a working `xz` command is available. Otherwise, it selects `.tar.gz`, including for older releases that only provide gzip. You don't need to install an extra decompression tool.
+
+The installer verifies the selected archive against `SHA256SUMS` and installs the executable to `~/.local/bin` by default. If the selected download, checksum verification, or extraction fails, installation stops without trying another format or replacing an existing binary.
 
 Run the installer over HTTPS:
 
@@ -60,7 +62,7 @@ Checksum verification is mandatory and has no disable option. The installer down
 
 ## Supported targets
 
-Pre-built releases cover four 64-bit Linux and macOS targets. Linux archives use MUSL so the same target works across common distributions.
+Pre-built releases cover four 64-bit Linux and macOS targets. Each target is published as both `.tar.gz` and `.tar.xz`, with both archives included in `SHA256SUMS`. The xz archives use ordinary LZMA2 compression without architecture-specific filters. Linux archives use MUSL so the same target works across common distributions.
 
 | Host | Release target |
 |------|----------------|

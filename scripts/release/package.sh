@@ -25,17 +25,22 @@ if [ ! -f "$binary" ] || [ ! -x "$binary" ]; then
 fi
 
 package_name="tmup-v${version}-${target}"
-archive_name="${package_name}.tar.gz"
-archive_path="$output_dir/$archive_name"
 temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/tmup-package.XXXXXX")
 trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
 
 mkdir -p "$temp_dir/$package_name" "$output_dir"
 cp "$binary" "$temp_dir/$package_name/tmup"
 chmod 755 "$temp_dir/$package_name/tmup"
-tar -czf "$temp_dir/$archive_name" -C "$temp_dir" "$package_name"
+tar -cf "$temp_dir/$package_name.tar" -C "$temp_dir" "$package_name"
+gzip -n -c "$temp_dir/$package_name.tar" >"$temp_dir/$package_name.tar.gz"
+xz -T1 -6 -c "$temp_dir/$package_name.tar" >"$temp_dir/$package_name.tar.xz"
 
-"$script_dir/validate-archive.sh" "$tag" "$target" "$temp_dir/$archive_name"
-mv -f "$temp_dir/$archive_name" "$archive_path"
-
-printf '%s\n' "$archive_path"
+# Validate both formats before publishing either package.
+for format in gz xz; do
+    "$script_dir/validate-archive.sh" "$tag" "$target" "$temp_dir/$package_name.tar.$format"
+done
+for format in gz xz; do
+    archive_name="$package_name.tar.$format"
+    mv -f "$temp_dir/$archive_name" "$output_dir/$archive_name"
+    printf '%s\n' "$output_dir/$archive_name"
+done

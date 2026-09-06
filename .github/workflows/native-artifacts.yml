@@ -54,6 +54,9 @@ jobs:
       - name: Set macOS deployment target
         if: runner.os == 'macOS'
         run: echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_deployment_target }}" >> "$GITHUB_ENV"
+      - name: Ensure xz is available on macOS
+        if: runner.os == 'macOS'
+        run: command -v xz >/dev/null || brew install xz
       - name: Build release binary
         run: cargo +stable build --release --locked --target "${{ matrix.target }}"
       - name: Package and smoke-test archive
@@ -64,18 +67,13 @@ jobs:
           binary_version=$("$binary" --version)
           version=${binary_version#tmup }
           tag="v$version"
-          archive=$(scripts/release/package.sh "$tag" "${{ matrix.target }}" "$binary" "$PWD/dist")
-          scripts/release/validate-archive.sh "$tag" "${{ matrix.target }}" "$archive"
-          artifact_name=$(basename "$archive" .tar.gz)
-          {
-            printf 'archive=%s\n' "$archive"
-            printf 'artifact_name=%s\n' "$artifact_name"
-          } >> "$GITHUB_OUTPUT"
-      - name: Upload archive
+          scripts/release/package.sh "$tag" "${{ matrix.target }}" "$binary" "$PWD/dist"
+          echo "artifact_name=tmup-$tag-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+      - name: Upload archives
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.package.outputs.artifact_name }}
-          path: ${{ steps.package.outputs.archive }}
+          path: dist/*
           if-no-files-found: error
           retention-days: 7
 

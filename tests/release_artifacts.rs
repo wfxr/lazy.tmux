@@ -53,15 +53,17 @@ fn package_unrunnable_release_archives(root: &std::path::Path) -> PathBuf {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&binary, permissions).unwrap();
 
-        let status = std::process::Command::new("tar")
-            .args(["-czf"])
-            .arg(downloads.join(format!("{package_name}.tar.gz")))
-            .arg("-C")
-            .arg(&payloads)
-            .arg(&package_name)
-            .status()
-            .unwrap();
-        assert!(status.success());
+        for (format, flag) in [("gz", "-czf"), ("xz", "-cJf")] {
+            let status = std::process::Command::new("tar")
+                .args([flag])
+                .arg(downloads.join(format!("{package_name}.tar.{format}")))
+                .arg("-C")
+                .arg(&payloads)
+                .arg(&package_name)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
     }
 
     downloads
@@ -586,31 +588,38 @@ fn local_packaging_produces_the_single_binary_archive_contract() {
         .arg(&output_dir)
         .assert()
         .success()
-        .stdout(format!("{}\n", archive.display()));
+        .stdout(format!(
+            "{}\n{}\n",
+            archive.display(),
+            output_dir.join(format!("{package_name}.tar.xz")).display()
+        ));
 
-    let listing = std::process::Command::new("tar")
-        .args(["-tzf", archive.to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(listing.status.success());
-    assert_eq!(
-        String::from_utf8(listing.stdout).unwrap(),
-        format!("{package_name}/\n{package_name}/tmup\n")
-    );
+    for (format, list_flag, extract_flag) in [("gz", "-tzf", "-xzf"), ("xz", "-tJf", "-xJf")] {
+        let archive = output_dir.join(format!("{package_name}.tar.{format}"));
+        let listing = std::process::Command::new("tar")
+            .args([list_flag, archive.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(listing.status.success());
+        assert_eq!(
+            String::from_utf8(listing.stdout).unwrap(),
+            format!("{package_name}/\n{package_name}/tmup\n")
+        );
 
-    let extracted = temp.path().join("extracted");
-    std::fs::create_dir(&extracted).unwrap();
-    let extraction = std::process::Command::new("tar")
-        .args(["-xzf", archive.to_str().unwrap(), "-C", extracted.to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(extraction.status.success());
+        let extracted = temp.path().join(format!("extracted-{format}"));
+        std::fs::create_dir(&extracted).unwrap();
+        let extraction = std::process::Command::new("tar")
+            .args([extract_flag, archive.to_str().unwrap(), "-C", extracted.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(extraction.status.success());
 
-    Command::new(extracted.join(package_name).join("tmup"))
-        .arg("--version")
-        .assert()
-        .success()
-        .stdout(format!("tmup {}\n", env!("CARGO_PKG_VERSION")));
+        Command::new(extracted.join(&package_name).join("tmup"))
+            .arg("--version")
+            .assert()
+            .success()
+            .stdout(format!("tmup {}\n", env!("CARGO_PKG_VERSION")));
+    }
 }
 
 #[test]
@@ -697,7 +706,9 @@ fn release_asset_preparation_generates_the_complete_checksum_manifest() {
     let targets = release_targets();
     let mut expected_names = targets
         .iter()
-        .map(|target| format!("tmup-v{version}-{target}.tar.gz"))
+        .flat_map(|target| {
+            ["gz", "xz"].map(|format| format!("tmup-v{version}-{target}.tar.{format}"))
+        })
         .chain(std::iter::once("SHA256SUMS".to_string()))
         .collect::<Vec<_>>();
     expected_names.sort();
@@ -710,7 +721,11 @@ fn release_asset_preparation_generates_the_complete_checksum_manifest() {
         .collect::<Vec<_>>();
     assert_eq!(
         checksum_names,
-        targets.iter().map(|target| format!("tmup-v{version}-{target}.tar.gz")).collect::<Vec<_>>()
+        targets
+            .iter()
+            .flat_map(|target| ["gz", "xz"]
+                .map(|format| format!("tmup-v{version}-{target}.tar.{format}")))
+            .collect::<Vec<_>>()
     );
 
     let verification = std::process::Command::new("sha256sum")
@@ -747,6 +762,25 @@ fn release_asset_preparation_rejects_an_incomplete_archive_set() {
     let temp = tempfile::tempdir().unwrap();
     let downloads = package_release_archives(temp.path());
     let missing_name = format!("tmup-v{}-aarch64-apple-darwin.tar.gz", env!("CARGO_PKG_VERSION"));
+    std::fs::remove_file(downloads.join(&missing_name)).unwrap();
+    let release = temp.path().join("release");
+
+    Command::new(release_script("prepare-assets.sh"))
+        .arg(package_tag())
+        .arg(&downloads)
+        .arg(&release)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(format!("missing asset: {missing_name}")));
+
+    assert!(!release.exists(), "failed preparation must not leave a partial asset directory");
+}
+
+#[test]
+fn release_asset_preparation_rejects_a_missing_xz_archive() {
+    let temp = tempfile::tempdir().unwrap();
+    let downloads = package_release_archives(temp.path());
+    let missing_name = format!("tmup-v{}-aarch64-apple-darwin.tar.xz", env!("CARGO_PKG_VERSION"));
     std::fs::remove_file(downloads.join(&missing_name)).unwrap();
     let release = temp.path().join("release");
 
@@ -833,6 +867,12 @@ fn release_publication_stages_assets_before_making_the_release_public() {
     assert!(calls[create..upload].contains("--draft"));
     assert!(calls[create..upload].contains("--generate-notes"));
     assert!(calls[publish..].contains("--draft=false"));
+    for target in release_targets() {
+        for format in ["gz", "xz"] {
+            let name = format!("tmup-v{}-{target}.tar.{format}", env!("CARGO_PKG_VERSION"));
+            assert!(calls[upload..publish].contains(&name), "archive was not uploaded: {name}");
+        }
+    }
 }
 
 #[test]
