@@ -24,6 +24,9 @@ log() {
     log_level=$1
     log_color=$2
     shift 2
+    if [ "$log_level" != erro ] && { [ "${quiet:-false}" = true ] || [ "${resolve_version:-false}" = true ]; }; then
+        return 0
+    fi
     if [ -t 2 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; then
         printf '\033[1;%sm[%s]\033[0m %s\n' "$log_color" "$log_level" "$*" >&2
     else
@@ -53,72 +56,124 @@ Options:
                         Select the latest published release, including prereleases
   --target <TARGET>     Rust target triple (default: native host target)
   --to <DIRECTORY>      Install directory (default: ~/.local/bin)
+  --resolve-version     Print the selected version without installing
+  --quiet               Suppress progress, informational, and PATH messages
   --force               Replace an existing tmup binary
   --help                Show this help
 EOF
 }
 
+# Each resource gets one initial attempt and at most two retries. Never let the
+# downloader add its own retry loop or inherit unsafe options from user config.
 download() {
     download_url=$1
     download_output=$2
     download_authorization=${3:-}
     download_progress=false
-    if [ "${4:-false}" = true ] && [ -t 2 ]; then
+    if [ "${4:-false}" = true ] && [ "$quiet" = false ] && [ -t 2 ]; then
         download_progress=true
     fi
     download_not_found=false
     download_errors="${tmp_dir}/download-errors"
+    download_attempt=1
+    while :; do
+        # Explicitly discard partial responses even if a downloader resumes by default.
+        : >"$download_output" || return 1
+        download_status=0
+        download_http_status=
+        case "$downloader" in
+        curl)
+            set -- curl --disable --fail --location --show-error \
+                --proto '=https' --proto-redir '=https' --max-redirs 10 \
+                --retry 0 --connect-timeout 10 --max-time 60 \
+                --write-out '%{http_code}' --output "$download_output"
+            if [ -n "$download_authorization" ]; then
+                set -- "$@" --header "$download_authorization"
+            fi
+            if [ "$download_progress" = true ]; then
+                set -- "$@" --progress-bar
+                download_http_status=$("$@" "$download_url") || download_status=$?
+            else
+                set -- "$@" --silent
+                download_http_status=$("$@" "$download_url" 2>"$download_errors") || download_status=$?
+            fi
+            ;;
+        wget)
+            wget_attempt || download_status=$?
+            ;;
+        esac
+        [ "$download_status" -ne 0 ] || return 0
 
-    case "$downloader" in
-    curl)
-        set -- curl --fail --location --show-error --write-out '%{http_code}' --output "$download_output"
-        if [ "$download_progress" = true ]; then
-            set -- "$@" --progress-bar
-        else
-            set -- "$@" --silent
-        fi
-        ;;
-    wget)
-        # Keep response headers available for 404 detection while wget sends its
-        # native progress directly to stderr, even with logging redirected.
-        set -- wget --quiet --server-response --output-file "$download_errors" --output-document "$download_output"
-        if [ "$download_progress" = true ]; then
-            set -- "$@" --show-progress --progress=bar:force
-        fi
-        ;;
-    esac
-    if [ -n "$download_authorization" ]; then
-        set -- "$@" --header "$download_authorization"
-    fi
-    download_status=0
-    case "$downloader" in
-    curl)
-        if [ "$download_progress" = true ]; then
-            download_http_status=$("$@" "$download_url") || download_status=$?
-        else
-            download_http_status=$("$@" "$download_url" 2>"$download_errors") || download_status=$?
-        fi
-        # Only an HTTP 404 permits trying an older release's gzip asset.
-        if [ "$download_status" -eq 22 ] && [ "$download_http_status" = 404 ]; then
-            download_not_found=true
+        download_retry=false
+        case "$downloader:$download_status" in
+        curl:22 | wget:8)
+            case "$download_http_status" in
+            404) download_not_found=true; return "$download_status" ;;
+            408 | 429 | 500 | 502 | 503 | 504) download_retry=true ;;
+            esac
+            ;;
+        curl:5 | curl:6 | curl:7 | curl:18 | curl:28 | curl:52 | curl:55 | curl:56 | curl:92 | wget:4)
+            download_retry=true
+            ;;
+        esac
+        if [ "$download_retry" = false ] || [ "$download_attempt" -ge 3 ]; then
+            # Downloader diagnostics can contain signed redirect URLs or credentials.
+            erro "${downloader} request failed (exit ${download_status}, HTTP ${download_http_status:-unknown})"
             return "$download_status"
         fi
-        ;;
-    wget)
-        LC_ALL=C "$@" "$download_url" || download_status=$?
+        sleep "$download_attempt"
+        download_attempt=$((download_attempt + 1))
+    done
+}
+
+wget_attempt() {
+    wget_url=$download_url
+    wget_redirects=0
+    wget_authorization=$download_authorization
+    while :; do
+        # GNU wget read-timeout is an inactivity limit, not a total transfer limit.
+        # tmup upgrade also supervises the complete helper with a phase deadline.
+        set -- wget --no-config --quiet --server-response --tries=1 \
+            --dns-timeout=10 --connect-timeout=10 --read-timeout=60 \
+            --max-redirect=0 --no-hsts --output-document "$download_output"
+        if [ -n "$wget_authorization" ]; then
+            set -- "$@" --header "$wget_authorization"
+        fi
+        : >"$download_output" || return 1
+        wget_status=0
+        if [ "$download_progress" = true ]; then
+            # Keep response headers separate while showing native progress live.
+            set -- "$@" --output-file "$download_errors" --show-progress --progress=bar:force
+            LC_ALL=C "$@" "$wget_url" || wget_status=$?
+        else
+            LC_ALL=C "$@" "$wget_url" 2>"$download_errors" || wget_status=$?
+        fi
         download_http_status=$(awk '$1 ~ /^HTTP\// { status = $2 } END { print status }' "$download_errors")
-        if [ "$download_status" -eq 8 ] && [ "$download_http_status" = 404 ]; then
-            download_not_found=true
-            return "$download_status"
-        fi
-        ;;
-    esac
-    if [ "$download_status" -ne 0 ]; then
-        if [ "$downloader" = wget ] || [ "$download_progress" = false ]; then
-            cat "$download_errors" >&2
-        fi
-    fi
-    return "$download_status"
+        case "$download_http_status" in
+        301 | 302 | 303 | 307 | 308)
+            [ "$wget_status" -eq 8 ] || return "$wget_status"
+            # --https-only does not constrain nonrecursive redirects. Follow them
+            # ourselves, rejecting protocol downgrades before issuing the request.
+            [ "$wget_redirects" -lt 10 ] || return 8
+            wget_location=$(awk 'tolower($1) == "location:" { print $2; exit }' "$download_errors")
+            case "$wget_location" in
+            https://*) wget_next=$wget_location ;;
+            //*) wget_next="https:${wget_location}" ;;
+            /*)
+                wget_authority=${wget_url#https://}
+                wget_authority=${wget_authority%%/*}
+                wget_next="https://${wget_authority}${wget_location}"
+                ;;
+            *) return 8 ;;
+            esac
+            # Do not forward a GitHub API token to a redirect recipient.
+            wget_authorization=
+            wget_url=$wget_next
+            wget_redirects=$((wget_redirects + 1))
+            ;;
+        *) return "$wget_status" ;;
+        esac
+    done
 }
 
 validate_version() {
@@ -220,6 +275,14 @@ parse_args() {
             destination=$2
             shift 2
             ;;
+        --resolve-version)
+            resolve_version=true
+            shift
+            ;;
+        --quiet)
+            quiet=true
+            shift
+            ;;
         --force)
             force=true
             shift
@@ -235,6 +298,7 @@ parse_args() {
     done
 }
 
+# ShellCheck 0.11 loses function definitions after resolve-only early returns.
 # shellcheck disable=SC2218
 main() {
     version=
@@ -242,6 +306,8 @@ main() {
     destination=
     force=false
     include_prerelease=false
+    resolve_version=false
+    quiet=false
 
     parse_args "$@"
 
@@ -249,27 +315,32 @@ main() {
         die "--include-prerelease/--pre cannot be combined with --version"
     fi
 
-    if [ -z "$destination" ]; then
-        [ -n "${HOME:-}" ] || die "HOME is required when --to is omitted"
-        destination="${HOME}/.local/bin"
-    fi
-    case "$destination" in
-    -*) destination="./${destination}" ;;
-    esac
-    destination_binary="${destination}/tmup"
-
-    if [ "$force" = false ] && { [ -e "$destination_binary" ] || [ -L "$destination_binary" ]; }; then
-        die "${destination_binary} already exists; pass --force to replace it"
-    fi
-
     if [ -n "$version" ]; then
         validate_version
+        if [ "$resolve_version" = true ]; then
+            printf '%s\n' "$version"
+            return
+        fi
     fi
 
-    if [ -n "$target" ]; then
-        validate_target
-    else
-        detect_target
+    if [ "$resolve_version" = false ]; then
+        if [ -z "$destination" ]; then
+            [ -n "${HOME:-}" ] || die "HOME is required when --to is omitted"
+            destination="${HOME}/.local/bin"
+        fi
+        case "$destination" in
+        -*) destination="./${destination}" ;;
+        esac
+        destination_binary="${destination}/tmup"
+
+        if [ "$force" = false ] && { [ -e "$destination_binary" ] || [ -L "$destination_binary" ]; }; then
+            die "${destination_binary} already exists; pass --force to replace it"
+        fi
+        if [ -n "$target" ]; then
+            validate_target
+        else
+            detect_target
+        fi
     fi
 
     if command -v curl >/dev/null 2>&1; then
@@ -339,6 +410,11 @@ match($0, /"tag_name"[[:space:]]*:[[:space:]]*"/) {
         fi
     fi
 
+    if [ "$resolve_version" = true ]; then
+        printf '%s\n' "$version"
+        return
+    fi
+
     archive_dir="tmup-v${version}-${target}"
     release_url="${RELEASES_URL}/v${version}"
     archive_name="${archive_dir}.tar.gz"
@@ -392,6 +468,18 @@ match($0, /"tag_name"[[:space:]]*:[[:space:]]*"/) {
     }
 ' "$members_path" || die "archive does not match the expected ${archive_dir}/tmup layout"
 
+    # Validate entry types before extraction, including hard links and special
+    # files. Member names above contain no spaces, so the final verbose field is
+    # unambiguous for regular files and directories on GNU tar and BSD tar.
+    types_path="${tmp_dir}/ARCHIVE_TYPES"
+    LC_ALL=C tar -tv"$compression"f "$archive_path" >"$types_path" || die "could not inspect ${archive_name}"
+    awk -v directory="${archive_dir}/" -v binary="${archive_dir}/tmup" '
+    substr($1, 1, 1) == "d" && $NF == directory { directories++; next }
+    substr($1, 1, 1) == "-" && $NF == binary { binaries++; next }
+    { unexpected = 1 }
+    END { if (unexpected || directories > 1 || binaries != 1) exit 1 }
+' "$types_path" || die "archive must contain only a regular tmup binary and its directory"
+
     extract_dir="${tmp_dir}/extract"
     mkdir "$extract_dir" || die "could not prepare archive extraction"
     tar -x"$compression"f "$archive_path" -C "$extract_dir" "$archive_dir/tmup" || die "could not extract ${archive_name}"
@@ -400,7 +488,14 @@ match($0, /"tag_name"[[:space:]]*:[[:space:]]*"/) {
     [ ! -L "${extract_dir}/${archive_dir}" ] || die "archive directory must not be a symlink"
     [ -f "$extracted_binary" ] || die "archive does not contain ${archive_dir}/tmup"
     [ ! -L "$extracted_binary" ] || die "archive tmup binary must not be a symlink"
-    [ -x "$extracted_binary" ] || die "archive tmup binary is not executable"
+    # -x asks the kernel about mount-level execution, and rejects noexec TMPDIR.
+    # Inspect executable mode bits instead; the upgrade client runs its candidate
+    # only after copying it beside the destination executable.
+    binary_mode=$(LC_ALL=C ls -ld "$extracted_binary") || die "could not inspect archive tmup binary"
+    printf '%s\n' "$binary_mode" | awk '
+    substr($1, 4, 1) ~ /[xs]/ || substr($1, 7, 1) ~ /[xs]/ || substr($1, 10, 1) ~ /[xt]/ { executable = 1 }
+    END { if (!executable) exit 1 }
+' || die "archive tmup binary is not executable"
 
     info "Installing tmup to ${destination_binary}..."
     mkdir -p "$destination" || die "could not create destination directory: ${destination}"
@@ -423,6 +518,7 @@ match($0, /"tag_name"[[:space:]]*:[[:space:]]*"/) {
     fi
     install_tmp=
 
+    [ "$quiet" = false ] || return 0
     info "Installed tmup v${version} to ${destination_binary}"
     case ":${PATH:-}:" in
     *":${destination}:"*) ;;

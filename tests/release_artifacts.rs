@@ -889,6 +889,25 @@ fn release_publication_can_retry_a_partial_upload() {
 }
 
 #[test]
+fn release_workflow_marks_only_tag_push_artifacts_as_official() {
+    let workflow = include_str!("../.github/workflows/native-artifacts.yml");
+    let build = workflow
+        .split("      - name: Build release binary\n")
+        .nth(1)
+        .unwrap()
+        .split("      - name:")
+        .next()
+        .unwrap();
+
+    assert!(build.contains(concat!(
+        "        env:\n",
+        "          TMUP_OFFICIAL_RELEASE: ",
+        "${{ github.event_name == 'push' && github.ref_type == 'tag' && '1' || '0' }}\n",
+    )));
+    assert_eq!(workflow.matches("TMUP_OFFICIAL_RELEASE:").count(), 1);
+}
+
+#[test]
 fn release_workflow_serializes_publication_by_tag_without_attestations() {
     let workflow = include_str!("../.github/workflows/native-artifacts.yml");
     let publish = workflow.split("  publish:\n").nth(1).unwrap();

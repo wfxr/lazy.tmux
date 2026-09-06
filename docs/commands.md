@@ -1,6 +1,6 @@
 # Use tmup commands
 
-This reference explains how each command interacts with configuration, the lock snapshot, managed plugin directories, and the running tmux server. It also documents status output, canonical target IDs, logs, and cleanup boundaries.
+This reference explains plugin lifecycle commands and how to upgrade tmup itself. It covers configuration, the lock snapshot, managed plugin directories, and the running tmux server. It also documents status output, canonical target IDs, logs, and cleanup boundaries.
 
 Run `tmup --help` or `tmup <command> --help` for the concise CLI syntax.
 
@@ -92,6 +92,46 @@ Tracking behavior is:
 
 Each candidate is prepared and built in staging before publication. A preparation or build failure preserves the previously installed and locked revision for that plugin. Other plugins can still update, and any partial failure makes the command exit non-zero.
 
+## `upgrade`
+
+`tmup upgrade` upgrades tmup itself. Use `tmup update [id]` to update plugins. Upgrade doesn't read plugin configuration or lockfiles, require a running tmux server, or change plugins. Ordinary commands, including `init`, never check for tmup releases.
+
+```sh
+tmup upgrade
+tmup upgrade --pre
+tmup upgrade --version 0.3.0
+tmup upgrade --force
+```
+
+Select the release and replacement policy with these options:
+
+| Option | Behavior |
+|--------|----------|
+| No selection option | Select GitHub's latest stable release |
+| `--pre` | Select the first non-draft published release, including prereleases |
+| `--version <VERSION>` | Select an exact retained release, with an optional leading `v`; permit downgrading |
+| `--force` | Permit replacing an unmarked build and reinstall an equal version |
+
+`--pre` and `--version` are mutually exclusive. Latest follows GitHub's release ordering, rather than searching every release for the highest SemVer. An implicitly selected older version is a successful no-op, even with `--force`; specify `--version` to downgrade. An equal version is also a successful no-op without `--force`, including an exact version whose release has been deleted. Installation of a missing release or platform asset fails without changing the current binary.
+
+Official release binaries carry a build marker. Cargo, source, and other unmarked builds require `--force`, which warns before replacing custom build choices with an official binary. The marker doesn't identify package managers that redistribute official binaries unchanged. A package manager can later overwrite the replacement or report a different installed version.
+
+Upgrade requires `/bin/sh`, `curl` or GNU `wget`, `tar` with gzip support, and standard POSIX utilities; xz is optional. It downloads one complete snapshot of [`main/install.sh`](https://raw.githubusercontent.com/wfxr/tmup/main/install.sh) and uses that same script for version selection and preparation. Exact versions pin the binary, not the installer script. Downloads use HTTPS certificate validation; no checksum manifest or artifact attestation is verified.
+
+### Replacement and cleanup
+
+Upgrade replaces the real file behind the running executable. It preserves absolute, relative, or chained symbolic links and supports renamed binaries. For example, a launcher at `~/.local/bin/tmup` pointing to `/opt/tools/tmup-current` continues pointing there after that target is replaced. Upgrade reports the real destination and never searches `PATH` for another installation.
+
+Downloads and extraction stay in a private system temporary directory, honoring `TMPDIR`, even on a `noexec` mount. The prepared binary is copied to one temporary file beside the real destination, checked by running `--version`, and atomically renamed over that destination. Failures before replacement preserve the old binary. Insufficient permissions or a destination changed during the operation produce an error; `--force` doesn't elevate privileges or bypass these checks.
+
+Normal completion and errors clean up temporary files after helper processes stop. Cleanup failures report the remaining paths. A crash or uncatchable termination can leave temporary files behind. A small destination lock file intentionally remains; simultaneous upgrades of the same real destination fail immediately. Upgrade keeps no backups: use `--version` with a retained release to roll back.
+
+### Network failures
+
+Transient network failures receive at most three attempts, separated by one- and two-second waits. Permanent errors, such as HTTP 404 or certificate failures, aren't retried. The installer's xz-to-gzip fallback for a missing xz asset still applies.
+
+Each phase has a total deadline: 120 seconds to download the installer, 60 seconds to resolve the version, 300 seconds to prepare the release, and 5 seconds to check the copied binary. A timeout stops the helper process group before cleanup. Retries don't restart these deadlines or repeat final replacement.
+
 ## `restore`
 
 `tmup restore [id]` first reconciles configuration, then prepares each selected remote plugin at the commit currently recorded in `tmup.lock`. Use it to repair an installed checkout that is missing, broken, or at another revision.
@@ -161,7 +201,7 @@ The verbose columns are exactly `Id`, `Name`, `Kind`, `State`, `Build`, `Load`, 
 
 ## Configuration modes
 
-Commands use native `tmup.kdl` in `pure` mode by default. Set `TMUP_CONFIG_MODE=mixed` to merge supported TPM-style declarations from the discovered tmux configuration.
+Plugin commands use native `tmup.kdl` in `pure` mode by default. `upgrade` ignores plugin configuration and configuration-mode settings. Set `TMUP_CONFIG_MODE=mixed` to merge supported TPM-style declarations from the discovered tmux configuration.
 
 Use the same mode whenever you inspect and mutate one setup:
 
@@ -178,7 +218,7 @@ Every command returns zero only when the requested operation succeeds. Config, l
 
 For lifecycle commands, successful plugins can be published and written to the lock even when another plugin fails. The final exit status remains non-zero. For `init`, independent plugins can still load after another plugin is omitted. This behavior makes failures visible to scripts without discarding safe work.
 
-Mutating commands use a cross-process operation lock. Standalone `install`, `sync`, `update`, `restore`, and `clean` fail immediately with a non-zero status when another operation holds the lock. `init` waits for the lock, then holds it through runtime loading. Read-only `list` doesn't acquire it.
+Mutating plugin commands use a cross-process operation lock. Standalone `install`, `sync`, `update`, `restore`, and `clean` fail immediately with a non-zero status when another operation holds the lock. `init` waits for the lock, then holds it through runtime loading. Read-only `list` doesn't acquire it.
 
 ## Files and directories
 

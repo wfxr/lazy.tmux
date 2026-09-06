@@ -27,6 +27,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Upgrade tmup itself
+    Upgrade(tmup::upgrade::Options),
     /// tmux startup: install missing plugins, apply options, load plugins
     Init(init_session::ProductionInitArgs),
     /// Install missing remote plugins
@@ -78,6 +80,11 @@ async fn main() -> ExitCode {
 
 async fn dispatch(command: Commands) -> Result<()> {
     match command {
+        Commands::Upgrade(options) => {
+            let outcome = tmup::upgrade::run(options)?;
+            writeln!(std::io::stdout(), "{outcome}")
+                .context("upgrade finished, but writing its result failed")
+        }
         Commands::Init(invocation) => invocation.execute().await,
         Commands::Install { id } => run_install(id, resolve_requested_config_mode()?).await,
         Commands::Sync { id } => run_sync(id, resolve_requested_config_mode()?).await,
