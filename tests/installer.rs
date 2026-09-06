@@ -43,10 +43,15 @@ impl InstallerTest {
             tmp_dir,
         };
         for command in [
-            "awk", "cat", "chmod", "cp", "grep", "gzip", "ln", "mkdir", "mktemp", "mv", "rm", "tar",
+            "awk", "cat", "chmod", "cp", "grep", "gzip", "ln", "ls", "mkdir", "mktemp", "mv", "rm",
+            "tar",
         ] {
             test.link_command(command);
         }
+        test.write_executable(
+            &test.bin_dir.join("sleep"),
+            "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$TMUP_TEST_FIXTURES/sleeps\"\n",
+        );
         test.write_fake_curl();
         test.write_fake_wget();
         test.write_fake_host_tools();
@@ -65,6 +70,7 @@ impl InstallerTest {
         self.write_executable(
             &self.bin_dir.join("curl"),
             r#"#!/bin/sh
+printf '%s\n' "$@" >> "$TMUP_TEST_FIXTURES/downloader-args"
 output=
 url=
 authorization=
@@ -99,11 +105,23 @@ status=200
 if [ -f "$TMUP_TEST_FIXTURES/$fixture.status" ]; then
     status=$(cat "$TMUP_TEST_FIXTURES/$fixture.status")
 fi
+if [ -f "$TMUP_TEST_FIXTURES/$fixture.failures" ]; then
+    attempt=0
+    [ ! -f "$TMUP_TEST_FIXTURES/$fixture.attempt" ] || attempt=$(cat "$TMUP_TEST_FIXTURES/$fixture.attempt")
+    attempt=$((attempt + 1))
+    printf '%s' "$attempt" > "$TMUP_TEST_FIXTURES/$fixture.attempt"
+    if [ "$attempt" -gt "$(cat "$TMUP_TEST_FIXTURES/$fixture.failures")" ]; then
+        status=200
+    fi
+fi
 printf '%s' "$status"
 if [ -f "$TMUP_TEST_FIXTURES/$fixture.exit" ]; then
     exit "$(cat "$TMUP_TEST_FIXTURES/$fixture.exit")"
 fi
-[ "$status" = 200 ] || exit 22
+if [ "$status" != 200 ]; then
+    printf 'partial transfer' >> "$output"
+    exit 22
+fi
 if [ "$progress" = true ]; then
     printf '\rdownload progress: %s\n' "$fixture" >&2
     if [ "${TMUP_TEST_WAIT_FOR_PROGRESS:-}" = 1 ]; then
@@ -111,7 +129,8 @@ if [ "$progress" = true ]; then
         [ "$acknowledgement" = continue ] || exit 99
     fi
 fi
-cp "$TMUP_TEST_FIXTURES/$fixture" "$output"
+[ ! -s "$output" ] || { printf 'partial response retained' >&2; exit 23; }
+cat "$TMUP_TEST_FIXTURES/$fixture" >> "$output"
 "#,
         );
     }
@@ -120,6 +139,7 @@ cp "$TMUP_TEST_FIXTURES/$fixture" "$output"
         self.write_executable(
             &self.bin_dir.join("wget"),
             r#"#!/bin/sh
+printf '%s\n' "$@" >> "$TMUP_TEST_FIXTURES/downloader-args"
 output=
 url=
 authorization=
@@ -155,6 +175,15 @@ status=200
 if [ -f "$TMUP_TEST_FIXTURES/$fixture.status" ]; then
     status=$(cat "$TMUP_TEST_FIXTURES/$fixture.status")
 fi
+if [ -f "$TMUP_TEST_FIXTURES/$fixture.failures" ]; then
+    attempt=0
+    [ ! -f "$TMUP_TEST_FIXTURES/$fixture.attempt" ] || attempt=$(cat "$TMUP_TEST_FIXTURES/$fixture.attempt")
+    attempt=$((attempt + 1))
+    printf '%s' "$attempt" > "$TMUP_TEST_FIXTURES/$fixture.attempt"
+    if [ "$attempt" -gt "$(cat "$TMUP_TEST_FIXTURES/$fixture.failures")" ]; then
+        status=200
+    fi
+fi
 if [ -n "$log_output" ]; then
     printf '  HTTP/1.1 302 Found\n  Location: https://example.test/asset\n  HTTP/1.1 %s Response\n' "$status" >"$log_output"
 else
@@ -163,7 +192,10 @@ fi
 if [ -f "$TMUP_TEST_FIXTURES/$fixture.exit" ]; then
     exit "$(cat "$TMUP_TEST_FIXTURES/$fixture.exit")"
 fi
-[ "$status" = 200 ] || exit 8
+if [ "$status" != 200 ]; then
+    printf 'partial transfer' >> "$output"
+    exit 8
+fi
 if [ "$progress" = true ]; then
     printf '\rdownload progress: %s\n' "$fixture" >&2
     if [ "${TMUP_TEST_WAIT_FOR_PROGRESS:-}" = 1 ]; then
@@ -171,7 +203,8 @@ if [ "$progress" = true ]; then
         [ "$acknowledgement" = continue ] || exit 99
     fi
 fi
-cp "$TMUP_TEST_FIXTURES/$fixture" "$output"
+[ ! -s "$output" ] || { printf 'partial response retained' >&2; exit 23; }
+cat "$TMUP_TEST_FIXTURES/$fixture" >> "$output"
 "#,
         );
     }
@@ -1462,6 +1495,441 @@ fn missing_gzip_after_xz_404_preserves_the_existing_binary() {
         let downloads = fs::read_to_string(&test.download_log).unwrap();
         assert_eq!(downloads.lines().count(), 2);
         assert!(downloads.lines().last().unwrap().ends_with(".tar.gz"));
+        test.assert_temporary_storage_is_empty();
+    }
+}
+
+#[test]
+fn resolves_exact_versions_without_network_home_target_or_destination_checks() {
+    let test = InstallerTest::new();
+    test.remove_tool("curl");
+    test.remove_tool("wget");
+    let destination = test.root.path().join("existing");
+    fs::create_dir(&destination).unwrap();
+    fs::write(destination.join("tmup"), "keep").unwrap();
+    let output = test
+        .command(&[
+            "--resolve-version",
+            "--version",
+            "v1.2.3-rc.1",
+            "--to",
+            destination.to_str().unwrap(),
+        ])
+        .env_remove("HOME")
+        .env("TMUP_TEST_HOST_OS", "unsupported")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(output.stdout, b"1.2.3-rc.1\n");
+    assert!(output.stderr.is_empty());
+    assert!(!test.download_log.exists());
+    assert!(!test.host_log.exists());
+    assert_eq!(fs::read(destination.join("tmup")).unwrap(), b"keep");
+    test.assert_temporary_storage_is_empty();
+}
+
+#[test]
+fn resolves_stable_and_prerelease_channels_without_installation_effects() {
+    for pre in [false, true] {
+        let test = InstallerTest::new();
+        test.write_latest_release("1.2.3");
+        test.write_release_list(
+            "[\n{\n\"tag_name\": \"v9.0.0\",\n\"draft\": true\n},\n{\n\"tag_name\": \"v2.0.0-rc.1\",\n\"draft\": false\n}\n]",
+        );
+        let args = if pre { vec!["--resolve-version", "--pre"] } else { vec!["--resolve-version"] };
+        let output = test.command(&args).env_remove("HOME").output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(output.stdout, if pre { b"2.0.0-rc.1\n".as_slice() } else { b"1.2.3\n" });
+        assert!(output.stderr.is_empty());
+        assert_eq!(fs::read_to_string(&test.download_log).unwrap().lines().count(), 1);
+        assert!(!test.host_log.exists());
+        assert!(!test.root.path().join("home").exists());
+        test.assert_temporary_storage_is_empty();
+    }
+}
+
+#[test]
+fn resolve_only_rejects_invalid_selection_without_stdout() {
+    for args in [
+        vec!["--resolve-version", "--version", "1.2"],
+        vec!["--resolve-version", "--version", "1.2.3+build"],
+        vec!["--resolve-version", "--version", "1.2.3", "--pre"],
+    ] {
+        let test = InstallerTest::new();
+        let output = test.run(&args);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(!output.stderr.is_empty());
+        assert!(!test.download_log.exists());
+    }
+}
+
+#[test]
+fn quiet_suppresses_success_and_path_messages_but_preserves_errors() {
+    let test = InstallerTest::new();
+    test.add_release("1.2.3", TARGET, "quiet payload");
+    let destination = test.root.path().join("not on path");
+    let args = [
+        "--quiet",
+        "--version",
+        "1.2.3",
+        "--target",
+        TARGET,
+        "--to",
+        destination.to_str().unwrap(),
+    ];
+    let output = test.run(&args);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert_eq!(fs::read(destination.join("tmup")).unwrap(), b"quiet payload");
+    let error = test.run(&args);
+    assert!(!error.status.success());
+    assert!(error.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&error.stderr).contains("--force"));
+    test.assert_temporary_storage_is_empty();
+}
+
+#[test]
+fn terminal_helper_modes_suppress_progress_and_info_but_keep_errors() {
+    for use_wget in [false, true] {
+        let test = InstallerTest::new();
+        if use_wget {
+            test.remove_tool("curl");
+        }
+        test.add_latest_release("1.2.3", TARGET, "quiet payload");
+        let resolved = run_with_terminal_stderr(&mut test.command(&["--resolve-version"]), false);
+        assert!(resolved.status.success(), "{}", String::from_utf8_lossy(&resolved.stderr));
+        assert_eq!(resolved.stdout, b"1.2.3\n");
+        assert!(resolved.stderr.is_empty());
+
+        let destination = test.root.path().join("quiet destination");
+        let args = ["--quiet", "--to", destination.to_str().unwrap()];
+        let installed = run_with_terminal_stderr(&mut test.command(&args), false);
+        assert!(installed.status.success(), "{}", String::from_utf8_lossy(&installed.stderr));
+        assert!(installed.stdout.is_empty());
+        assert!(installed.stderr.is_empty());
+        assert_eq!(fs::read(destination.join("tmup")).unwrap(), b"quiet payload");
+
+        let error = run_with_terminal_stderr(&mut test.command(&args), false);
+        assert!(!error.status.success());
+        assert!(String::from_utf8_lossy(&error.stderr).contains("[erro]"));
+        test.assert_temporary_storage_is_empty();
+    }
+}
+
+#[test]
+fn terminal_archive_retries_preserve_live_progress_and_discard_partial_files() {
+    for use_wget in [false, true] {
+        let test = InstallerTest::new();
+        if use_wget {
+            test.remove_tool("curl");
+        }
+        test.add_release("1.2.3", TARGET, "retried payload");
+        let name = format!("tmup-v1.2.3-{TARGET}.tar.gz");
+        fs::write(test.fixtures_dir.join(format!("{name}.status")), "503").unwrap();
+        fs::write(test.fixtures_dir.join(format!("{name}.failures")), "2").unwrap();
+        let destination = test.root.path().join("destination");
+        let mut command =
+            test.command(&["--version", "1.2.3", "--to", destination.to_str().unwrap()]);
+        command.env("TMUP_TEST_WAIT_FOR_PROGRESS", "1");
+        let output = run_with_terminal_stderr(&mut command, true);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert!(output.stdout.is_empty());
+        assert_eq!(stderr.matches("download progress:").count(), 1);
+        assert_eq!(fs::read_to_string(&test.download_log).unwrap().lines().count(), 3);
+        assert_eq!(fs::read_to_string(test.fixtures_dir.join("sleeps")).unwrap(), "1\n2\n");
+        assert_eq!(fs::read(destination.join("tmup")).unwrap(), b"retried payload");
+        test.assert_temporary_storage_is_empty();
+    }
+}
+
+#[test]
+fn retries_transient_http_failures_three_times_with_backoff_and_discards_partial_files() {
+    for use_wget in [false, true] {
+        for status in ["408", "429", "500", "502", "503", "504"] {
+            let test = InstallerTest::new();
+            if use_wget {
+                test.remove_tool("curl");
+            }
+            test.write_latest_release("1.2.3");
+            fs::write(test.fixtures_dir.join("latest.status"), status).unwrap();
+            fs::write(test.fixtures_dir.join("latest.failures"), "2").unwrap();
+            let output = test.run(&["--resolve-version"]);
+            assert!(
+                output.status.success(),
+                "{status}, wget={use_wget}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stdout, b"1.2.3\n");
+            assert_eq!(fs::read_to_string(&test.download_log).unwrap().lines().count(), 3);
+            assert_eq!(fs::read_to_string(test.fixtures_dir.join("sleeps")).unwrap(), "1\n2\n");
+            let args = fs::read_to_string(test.fixtures_dir.join("downloader-args")).unwrap();
+            if use_wget {
+                for flag in [
+                    "--no-config",
+                    "--tries=1",
+                    "--connect-timeout=10",
+                    "--read-timeout=60",
+                    "--max-redirect=0",
+                ] {
+                    assert!(args.lines().any(|arg| arg == flag), "missing {flag}: {args}");
+                }
+            } else {
+                assert_eq!(args.lines().next(), Some("--disable"));
+                for flag in [
+                    "--proto",
+                    "--proto-redir",
+                    "=https",
+                    "--retry",
+                    "--connect-timeout",
+                    "--max-time",
+                ] {
+                    assert!(args.lines().any(|arg| arg == flag), "missing {flag}: {args}");
+                }
+            }
+            test.assert_temporary_storage_is_empty();
+        }
+    }
+}
+
+#[test]
+fn exhausted_archive_retries_preserve_destination_and_do_not_fall_back() {
+    for use_wget in [false, true] {
+        let test = InstallerTest::new();
+        test.link_command("xz");
+        if use_wget {
+            test.remove_tool("curl");
+        }
+        test.add_release("1.2.3", TARGET, "candidate");
+        test.add_xz_archive("1.2.3", TARGET);
+        fs::write(test.fixtures_dir.join(format!("tmup-v1.2.3-{TARGET}.tar.xz.status")), "503")
+            .unwrap();
+        let destination = test.root.path().join("destination");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("tmup"), "original").unwrap();
+        let output = test.force_install("1.2.3", TARGET, &destination);
+        assert!(!output.status.success());
+        let downloads = fs::read_to_string(&test.download_log).unwrap();
+        assert_eq!(downloads.lines().count(), 3);
+        assert!(!downloads.contains(".tar.gz"));
+        assert_eq!(fs::read_to_string(test.fixtures_dir.join("sleeps")).unwrap(), "1\n2\n");
+        assert_eq!(fs::read(destination.join("tmup")).unwrap(), b"original");
+        test.assert_temporary_storage_is_empty();
+    }
+}
+
+#[test]
+fn fatal_network_and_format_errors_are_not_retried() {
+    for use_wget in [false, true] {
+        for (http, exit) in if use_wget {
+            vec![("401", "8"), ("403", "8"), ("404", "8"), ("000", "5"), ("200", "3")]
+        } else {
+            vec![("401", "22"), ("403", "22"), ("404", "22"), ("000", "60"), ("200", "23")]
+        } {
+            let test = InstallerTest::new();
+            if use_wget {
+                test.remove_tool("curl");
+            }
+            test.write_latest_release("1.2.3");
+            fs::write(test.fixtures_dir.join("latest.status"), http).unwrap();
+            fs::write(test.fixtures_dir.join("latest.exit"), exit).unwrap();
+            let output = test.run(&["--resolve-version"]);
+            assert!(!output.status.success());
+            assert_eq!(fs::read_to_string(&test.download_log).unwrap().lines().count(), 1);
+            assert!(!test.fixtures_dir.join("sleeps").exists());
+            test.assert_temporary_storage_is_empty();
+        }
+        let test = InstallerTest::new();
+        if use_wget {
+            test.remove_tool("curl");
+        }
+        fs::write(test.fixtures_dir.join("latest"), "bad JSON").unwrap();
+        assert!(!test.run(&["--resolve-version"]).status.success());
+        assert_eq!(fs::read_to_string(&test.download_log).unwrap().lines().count(), 1);
+        assert!(!test.fixtures_dir.join("sleeps").exists());
+        test.assert_temporary_storage_is_empty();
+    }
+}
+
+#[test]
+fn transient_transport_errors_have_the_same_three_attempt_budget() {
+    for (downloader, exit) in [
+        ("curl", "6"),
+        ("curl", "7"),
+        ("curl", "18"),
+        ("curl", "28"),
+        ("curl", "56"),
+        ("wget", "4"),
+    ] {
+        let test = InstallerTest::new();
+        if downloader == "wget" {
+            test.remove_tool("curl");
+        }
+        fs::write(test.fixtures_dir.join("latest.status"), "000").unwrap();
+        fs::write(test.fixtures_dir.join("latest.exit"), exit).unwrap();
+        let output = test.run(&["--resolve-version"]);
+        assert!(!output.status.success());
+        assert_eq!(fs::read_to_string(&test.download_log).unwrap().lines().count(), 3);
+        assert_eq!(fs::read_to_string(test.fixtures_dir.join("sleeps")).unwrap(), "1\n2\n");
+        test.assert_temporary_storage_is_empty();
+    }
+}
+
+#[test]
+fn wget_only_follows_https_redirects_and_does_not_forward_api_tokens() {
+    for location in [
+        "https://assets.example/redirect",
+        "//assets.example/redirect",
+        "/redirect",
+        "http://assets.example/redirect",
+    ] {
+        let test = InstallerTest::new();
+        test.remove_tool("curl");
+        test.write_latest_release("1.2.3");
+        test.write_executable(
+            &test.bin_dir.join("wget"),
+            r#"#!/bin/sh
+output=
+authorization=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output-document) output=$2; shift 2 ;;
+        --header) authorization=$2; shift 2 ;;
+        https://*|http://*) url=$1; shift ;;
+        *) shift ;;
+    esac
+done
+printf '%s\n' "$url" >> "$TMUP_TEST_DOWNLOAD_LOG"
+[ -z "$authorization" ] || printf '%s\n' "$authorization" >> "$TMUP_TEST_AUTHORIZATION_LOG"
+case "$url" in
+    */latest)
+        printf 'HTTP/1.1 302 Found\nLocation: %s\n' "$TMUP_TEST_LOCATION" >&2
+        printf 'redirect body' > "$output"
+        exit 8
+        ;;
+    *)
+        printf 'HTTP/1.1 200 OK\n' >&2
+        [ ! -s "$output" ] || exit 3
+        cat "$TMUP_TEST_FIXTURES/latest" >> "$output"
+        ;;
+esac
+"#,
+        );
+        let output = test
+            .command(&["--resolve-version"])
+            .env("TMUP_TEST_LOCATION", location)
+            .env("GITHUB_TOKEN", "fake-secret")
+            .output()
+            .unwrap();
+        let secure = !location.starts_with("http:");
+        assert_eq!(
+            output.status.success(),
+            secure,
+            "{location}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("fake-secret"));
+        let downloads = fs::read_to_string(&test.download_log).unwrap();
+        assert_eq!(downloads.lines().count(), if secure { 2 } else { 1 });
+        assert!(downloads.lines().all(|url| url.starts_with("https://")));
+        assert_eq!(fs::read_to_string(&test.authorization_log).unwrap().lines().count(), 1);
+        if secure {
+            assert_eq!(output.stdout, b"1.2.3\n");
+        }
+        assert!(!test.fixtures_dir.join("sleeps").exists());
+        test.assert_temporary_storage_is_empty();
+    }
+}
+
+#[test]
+fn wget_redirect_loops_are_bounded_without_retries() {
+    let test = InstallerTest::new();
+    test.remove_tool("curl");
+    test.write_executable(
+        &test.bin_dir.join("wget"),
+        "#!/bin/sh\nprintf 'request\\n' >> \"$TMUP_TEST_DOWNLOAD_LOG\"\nprintf 'HTTP/1.1 302 Found\\nLocation: https://example.test/loop\\n' >&2\nexit 8\n",
+    );
+    let output = test.run(&["--resolve-version"]);
+    assert!(!output.status.success());
+    assert_eq!(fs::read_to_string(&test.download_log).unwrap().lines().count(), 11);
+    assert!(!test.fixtures_dir.join("sleeps").exists());
+    test.assert_temporary_storage_is_empty();
+}
+
+// Build precisely typed archive entries without relying on host permissions for
+// device nodes or the host tar's decisions about duplicate hard links.
+fn write_typed_archive(test: &InstallerTest, types: &[u8]) {
+    let mut archive = Vec::new();
+    for kind in types {
+        let mut header = [0_u8; 512];
+        let name = format!("tmup-v1.2.3-{TARGET}/tmup");
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        header[100..108].copy_from_slice(b"0000755\0");
+        header[108..116].copy_from_slice(b"0000000\0");
+        header[116..124].copy_from_slice(b"0000000\0");
+        header[124..136].copy_from_slice(b"00000000000\0");
+        header[136..148].copy_from_slice(b"00000000000\0");
+        header[148..156].fill(b' ');
+        header[156] = *kind;
+        if matches!(kind, b'1' | b'2') {
+            header[157..167].copy_from_slice(b"../outside");
+        }
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let checksum: usize = header.iter().map(|byte| usize::from(*byte)).sum();
+        header[148..156].copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
+        archive.extend_from_slice(&header);
+    }
+    archive.extend_from_slice(&[0; 1024]);
+    let raw = test.root.path().join("archive.tar");
+    fs::write(&raw, archive).unwrap();
+    let compressed = Command::new(find_command("gzip")).arg("-c").arg(raw).output().unwrap();
+    assert!(compressed.status.success());
+    fs::write(test.archive_path("1.2.3", TARGET), compressed.stdout).unwrap();
+}
+
+#[test]
+fn unsafe_archive_entry_types_and_duplicates_are_rejected_before_extraction() {
+    for types in [vec![b'1'], vec![b'2'], vec![b'3'], vec![b'4'], vec![b'6'], vec![b'0', b'0']] {
+        let test = InstallerTest::new();
+        write_typed_archive(&test, &types);
+        let tar = find_command("tar");
+        test.remove_tool("tar");
+        test.write_executable(
+            &test.bin_dir.join("tar"),
+            &format!("#!/bin/sh\ncase \"$1\" in -x*) printf 'extracted' > \"$TMUP_TEST_FIXTURES/extracted\"; exit 99;; esac\nexec '{}' \"$@\"\n", tar.display()),
+        );
+        let destination = test.root.path().join("destination");
+        let output = test.install("1.2.3", TARGET, &destination);
+        assert!(!output.status.success(), "accepted {types:?}");
+        assert!(
+            !test.fixtures_dir.join("extracted").exists(),
+            "extracted {types:?} before rejection"
+        );
+        assert!(!destination.exists());
+        test.assert_temporary_storage_is_empty();
+    }
+}
+
+#[test]
+fn retries_archive_transfers_into_empty_files_before_installing() {
+    for use_wget in [false, true] {
+        let test = InstallerTest::new();
+        if use_wget {
+            test.remove_tool("curl");
+        }
+        test.add_release("1.2.3", TARGET, "complete candidate");
+        let name = format!("tmup-v1.2.3-{TARGET}.tar.gz");
+        fs::write(test.fixtures_dir.join(format!("{name}.status")), "503").unwrap();
+        fs::write(test.fixtures_dir.join(format!("{name}.failures")), "2").unwrap();
+        let destination = test.root.path().join("destination");
+        let output = test.install("1.2.3", TARGET, &destination);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(fs::read(destination.join("tmup")).unwrap(), b"complete candidate");
+        assert_eq!(fs::read_to_string(&test.download_log).unwrap().lines().count(), 3);
+        assert_eq!(fs::read_to_string(test.fixtures_dir.join("sleeps")).unwrap(), "1\n2\n");
         test.assert_temporary_storage_is_empty();
     }
 }

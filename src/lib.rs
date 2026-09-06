@@ -33,6 +33,8 @@ pub mod sync;
 pub mod termui;
 /// tmux command execution and display-message helpers.
 pub mod tmux;
+/// Explicit replacement of the running tmup executable with a published release.
+pub mod upgrade;
 
 /// Return the first 7 characters of a commit hash for display.
 pub fn short_hash(hash: &str) -> &str {

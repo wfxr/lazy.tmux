@@ -43,9 +43,10 @@ features.
 
 ## Requirements
 
-tmup requires `tmux` and `git`. The remote installer also requires `tar` and
-either `curl` or `wget`. Configurations that use shell predicates, remote
-build commands, or plugin-scoped bindings require `/bin/sh`.
+tmup requires `tmux` and `git`. The remote installer and `tmup upgrade` also
+require `/bin/sh`, `tar` with gzip support, and either `curl` or GNU `wget`.
+Configurations that use shell predicates, remote build commands, or
+plugin-scoped bindings require `/bin/sh`.
 
 Pre-built binaries are available for 64-bit Linux and macOS. Linux releases
 use MUSL and work across common Linux distributions.
@@ -67,6 +68,11 @@ If you have a Rust toolchain, you can install the crates.io release instead:
 ```sh
 cargo install tmup --locked
 ```
+
+Upgrade an official release installation with `tmup upgrade`. Use
+`tmup update` to update plugins instead. See the
+[upgrade reference](docs/commands.md#upgrade) for version selection and
+replacing source builds.
 
 See the [installation guide](docs/installation.md) for installer options,
 supported targets, and manual installation.

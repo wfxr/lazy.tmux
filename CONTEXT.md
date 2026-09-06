@@ -31,3 +31,11 @@ _Avoid_: Active state, loaded state
 **Runtime Configuration Branch**:
 A mutually exclusive choice between plugin-scoped runtime declarations selected once for an Init Session on its Execution Host. It does not change plugin inclusion, Load Eligibility, or lock-backed managed state.
 _Avoid_: Conditional Load Condition, client-specific configuration
+
+**tmup Upgrade**:
+Replacement of the installed tmup program with a selected published tmup release. It is independent of plugin configuration, revisions, and loading.
+_Avoid_: Plugin upgrade, self update
+
+**Plugin Update**:
+Advancement of declared remote plugins with floating tracking selectors to newer revisions, with successful revisions recorded in the lock snapshot.
+_Avoid_: tmup upgrade, application update

@@ -2,13 +2,13 @@
 
 This guide covers the supported installation methods, release targets, and installer options. The remote installer is the shortest path for most users; crates.io and manual asset installation are available when you need a different workflow.
 
-tmup requires `tmux` and `git` at runtime. Configurations that use shell predicates, remote build commands, or plugin-scoped bindings also require `/bin/sh`. The remote installer additionally requires `tar` and either `curl` or `wget`.
+tmup requires `tmux` and `git` at runtime. Configurations that use shell predicates, remote build commands, or plugin-scoped bindings also require `/bin/sh`. The remote installer and `tmup upgrade` additionally require `/bin/sh`, `tar` with gzip support, standard POSIX utilities, and either `curl` or GNU `wget`. xz is optional.
 
 ## Install the latest stable release
 
 The repository-owned installer downloads the latest stable GitHub release for your host. It prefers `.tar.xz` when a working `xz` command is available. If the xz asset returns HTTP 404, it downloads `.tar.gz` instead, supporting older releases that only provide gzip. Without a working `xz` command, it downloads `.tar.gz` directly. You don't need to install an extra decompression tool.
 
-The installer checks the archive layout and installs the executable to `~/.local/bin` by default. Other download errors, including connection failures and HTTP errors other than the xz asset returning 404, stop installation. Decompression, layout, or extraction failures also stop installation without trying another format or replacing an existing binary.
+The installer checks the archive layout and installs the executable to `~/.local/bin` by default. Transient download failures receive at most three attempts, with one- and two-second waits. Other HTTP errors, certificate failures, and exhausted retries stop installation. Decompression, layout, or extraction failures also stop installation without trying another format or replacing an existing binary.
 
 Run the installer over HTTPS:
 
@@ -17,6 +17,18 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/wfxr/tmu
 ```
 
 The installer doesn't replace an existing `tmup` executable unless you pass `--force`. Make sure the installation directory is in the `PATH` inherited by both your shell and the tmux server.
+
+## Upgrade an existing installation
+
+Upgrade an official release installation with:
+
+```sh
+tmup upgrade
+```
+
+Use `--pre` to include prereleases, `--version <VERSION>` to select a retained release or downgrade, and `--force` to reinstall the same version or replace a Cargo/source build with an official binary. `--force` alone never permits a downgrade. Upgrade preserves symbolic links by replacing the running executable's real target.
+
+The command downloads the current installer from `main`, prepares files in the system temporary directory, then checks and atomically replaces a candidate beside the installed executable. It doesn't verify SHA256 manifests or retain backups. See the [upgrade command reference](commands.md#upgrade) for selection rules, cleanup, timeouts, and installation ownership.
 
 ## Choose an installer release
 
@@ -49,7 +61,11 @@ Pass installer options after `sh -s --` when you use the piped command. These op
 | `--target <TARGET>` | Override host detection with a supported target triple |
 | `--to <DIRECTORY>` | Install to a directory other than `~/.local/bin` |
 | `--force` | Replace an existing `tmup` executable at the destination |
+| `--resolve-version` | Print only the normalized selected version, without downloading an archive or checking an installation destination |
+| `--quiet` | Suppress installation success and PATH messages; preserve errors |
 | `--help` | Print usage and exit without installing |
+
+`--resolve-version` and `--quiet` also form the supported helper interface used by `tmup upgrade`. An exact version query normalizes its argument without checking release availability.
 
 For example, install to a private bin directory and replace an existing copy:
 
@@ -58,7 +74,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/wfxr/tmu
   sh -s -- --to "$HOME/bin" --force
 ```
 
-The installer downloads and extracts into a temporary directory. It stages the executable at the destination and replaces an existing binary only after all archive checks and staging succeed.
+The installer downloads and extracts into a temporary directory, honoring `TMPDIR`. It checks file types and executable mode bits without running the extracted binary, so preparation also works on a `noexec` mount. It stages the executable at the destination and replaces an existing binary only after all archive checks and staging succeed.
 
 ## Supported targets
 
